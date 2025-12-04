@@ -114,6 +114,16 @@ MOBILE_HTML_TEMPLATE = """
             <select id="product-select" onchange="updateStockDisplay()"></select>
             <span id="stock-display" class="stock-tag">Checking stock...</span>
 
+            <div id="source-container" style="display:none;">
+                <label>Source:</label>
+                <select id="source-select">
+                    <option value="Delivery Receipt">Delivery Receipt</option>
+                    <option value="Remaining">Remaining</option>
+                    <option value="Transfers">Transfers</option>
+                    <option value="Beverages">Beverages</option>
+                </select>
+            </div>
+
             <label>Quantity:</label>
             <input type="number" id="qty" value="1" min="1">
 
@@ -169,6 +179,9 @@ MOBILE_HTML_TEMPLATE = """
             document.getElementById('mode-label').innerText = mode === 'sales' ? 'Sales' : 'Stock In';
             document.getElementById('header-title').innerText = mode === 'sales' ? 'POS REMOTE: SALES' : 'POS REMOTE: STOCK IN';
 
+            // Show/Hide Source
+            document.getElementById('source-container').style.display = mode === 'inventory' ? 'block' : 'none';
+
             cart = [];
             renderCart();
             updateStockDisplay();
@@ -204,6 +217,12 @@ MOBILE_HTML_TEMPLATE = """
             const prod = products.find(p => p.name === name);
             if(!prod) return;
 
+            // Source Logic
+            let source = "Remaining";
+            if (currentMode === 'inventory') {
+                source = document.getElementById('source-select').value;
+            }
+
             // --- STOCK CHECK (Client Side) ---
             if (currentMode === 'sales') {
                 let currentCartQty = 0;
@@ -216,7 +235,7 @@ MOBILE_HTML_TEMPLATE = """
                 }
             }
 
-            let existing = cart.find(i => i.name === name);
+            let existing = cart.find(i => i.name === name && i.source === source);
             if(existing) {
                 existing.qty += qty;
                 existing.subtotal = existing.qty * existing.price;
@@ -226,7 +245,8 @@ MOBILE_HTML_TEMPLATE = """
                     price: prod.price,
                     category: prod.category,
                     qty: qty,
-                    subtotal: prod.price * qty
+                    subtotal: prod.price * qty,
+                    source: source
                 });
             }
             renderCart();
@@ -241,7 +261,10 @@ MOBILE_HTML_TEMPLATE = """
                 total += item.subtotal;
                 let div = document.createElement('div');
                 div.className = 'cart-item';
-                div.innerHTML = `<span>${item.name} x${item.qty}</span> <span>${item.subtotal.toFixed(2)}</span> <span style='color:red; cursor:pointer; margin-left:10px;' onclick='remItem(${index})'>[x]</span>`;
+                let desc = item.name;
+                if(currentMode === 'inventory') desc += ' (' + item.source + ')';
+
+                div.innerHTML = `<span>${desc} x${item.qty}</span> <span>${item.subtotal.toFixed(2)}</span> <span style='color:red; cursor:pointer; margin-left:10px;' onclick='remItem(${index})'>[x]</span>`;
                 list.appendChild(div);
             });
             document.getElementById('total-amt').innerText = total.toFixed(2);
@@ -813,12 +836,13 @@ class POSSystem:
         return datetime.datetime.now()
 
     def load_products(self):
-        req_cols = ["Business Name", "Product Category", "Product Name", "Price"]
-        # Expected new columns: Src_DeliveryReceipt, Src_Remaining, Src_Transfers, Src_Beverages, DR Price
+        req_cols = ["Business Name", "Product Category", "Product Name", "Price",
+                    "Src_DeliveryReceipt", "Src_Remaining", "Src_Transfers", "Src_Beverages", "DR Price"]
 
         if not os.path.exists(DATA_FILE):
+            # Create template with new columns if not exists
             df = pd.DataFrame(columns=req_cols)
-            df.loc[0] = ["My Business", "General", "Sample Product", 100.00]
+            df.loc[0] = ["My Business", "General", "Sample Product", 100.00, 1, 1, 1, 1, 0.0]
             try:
                 df.to_excel(DATA_FILE, index=False)
             except:
@@ -857,18 +881,40 @@ class POSSystem:
             if name in seen_names: is_valid = False
             if not name or name.lower() == 'nan': is_valid = False
 
+            # Source Validation: At least one source must be defined (True/1)
+            # If columns are missing in Excel, we assume default 1?
+            # Requirement: "A product without a defined Source should be marked as error"
+            # This implies if the COLUMNS exist and all are 0/False, or if missing we might need strict check.
+            # I will check existence of columns. If missing, I assume 0 and fail?
+            # Or if missing, maybe old format -> Default to Remaining?
+            # Let's be strict but forgiving on missing columns if they haven't updated Excel structure yet.
+            # If Excel has NO Src columns, maybe warn user?
+            # But here we assume structure is updated.
+
+            src_flags = {}
+            has_at_least_one_source = False
+
+            for src in SOURCES:
+                col_name = f"Src_{src.replace(' ', '')}"
+                # If column missing, treat as False/0 (Strict validation per request)
+                # But to avoid breaking existing setups immediately without manual update,
+                # if ALL src columns are missing, maybe we shouldn't reject everything?
+                # But requirement is specific. I will default to 0.
+
+                val = row.get(col_name, 0)
+                if pd.isna(val): val = 0
+                is_src_active = bool(int(val)) if str(val).isdigit() else bool(val)
+                src_flags[col_name] = is_src_active # Store with column name for DataFrame compatibility
+                if is_src_active: has_at_least_one_source = True
+
+            if not has_at_least_one_source:
+                is_valid = False
+
             if is_valid:
                 seen_names.add(name)
                 b_name = str(row.get('Business Name', self.business_name))
-
-                # Source checks
-                src_flags = {}
-                for src in SOURCES:
-                    col_name = f"Src_{src.replace(' ', '')}"
-                    val = row.get(col_name, 1) # Default to 1 if missing for now
-                    src_flags[src] = bool(val)
-
                 dr_price = float(row.get('DR Price', 0.0))
+                if pd.isna(dr_price): dr_price = 0.0
 
                 prod_data = {
                     "Business Name": b_name,
@@ -2734,6 +2780,19 @@ class POSSystem:
                              "qty_final": it['qty'], "category": it.get('category')})
                     self.generate_grouped_pdf(os.path.join(CORRECTION_FOLDER, fname), "CORRECTION RECEIPT", date_str,
                                               pdf_items, ["Item", "Orig", "Adj", "Final"], [1.0, 4.5, 5.5, 6.5])
+                elif entry['type'] == "damaged_in":
+                    pdf_items = []
+                    for i in items:
+                        c = i.copy()
+                        c['category'] = f"{i.get('source', 'Unknown')} - {i.get('category', 'General')}"
+                        pdf_items.append(c)
+                    self.generate_grouped_pdf(os.path.join(DAMAGED_FOLDER, fname), "DAMAGED INVENTORY (IN)",
+                                              date_str, pdf_items, ["Item", "Source", "Qty"],
+                                              [1.0, 4.5, 6.5], subtotal_indices=[2])
+                elif entry['type'] == "damaged_out":
+                    self.generate_grouped_pdf(os.path.join(DAMAGED_FOLDER, fname), "RETURNS RECEIPT",
+                                              date_str, items, ["Item", "Price", "Qty"],
+                                              [1.0, 4.5, 5.5], subtotal_indices=[2])
                 count += 1
             self.refresh_stock_cache()
             messagebox.showinfo("Success",
