@@ -1052,24 +1052,36 @@ class POSSystem:
 
         stats, _, _, _ = self.calculate_stats(None)
 
-        # Filter items: Remaining and Beverage only
+        # Filter items: Remaining and Beverage only. Check for stock OR damaged items.
         report_items = []
         for name, data in stats.items():
             sources = data.get('sources', {})
+            damaged_sources = data.get('damaged_sources', {})
+
+            # Check Remaining
             rem_qty = sources.get("Remaining", 0)
+            rem_dmg = damaged_sources.get("Remaining", 0)
+
+            # Check Beverages
             bev_qty = sources.get("Beverages", 0)
+            bev_dmg = damaged_sources.get("Beverages", 0)
 
             # Also get price and category from product info
             code, name_real, price, cat = self.get_product_details(name)
 
-            if rem_qty > 0:
-                report_items.append({"name": name, "qty": rem_qty, "source": "Remaining", "price": price, "category": cat})
-            if bev_qty > 0:
-                report_items.append({"name": name, "qty": bev_qty, "source": "Beverages", "price": price, "category": cat})
+            if rem_qty > 0 or rem_dmg > 0:
+                report_items.append({
+                    "name": name, "qty": rem_qty, "damaged": rem_dmg,
+                    "source": "Remaining", "price": price, "category": cat
+                })
+            if bev_qty > 0 or bev_dmg > 0:
+                report_items.append({
+                    "name": name, "qty": bev_qty, "damaged": bev_dmg,
+                    "source": "Beverages", "price": price, "category": cat
+                })
 
         if not report_items:
-             messagebox.showinfo("Info", "No stock in Remaining or Beverages to report.")
-             # Mark done anyway?
+             messagebox.showinfo("Info", "No stock or damaged items in Remaining or Beverages to report.")
              self.config["last_bi_date"] = now.strftime("%Y-%m-%d")
              self.save_config()
              return
@@ -1078,30 +1090,15 @@ class POSSystem:
         pdf_items = []
         for i in report_items:
             c = i.copy()
-            c['category'] = f"{i['source']} - {i['category']}"
+            # We are now passing explicit Source column in header.
             pdf_items.append(c)
 
+        # Call generate_grouped_pdf with new columns
+        # Header: Item, Source, Stock, Damaged
         success = self.generate_grouped_pdf(full_path, "BEGINNING INVENTORY",
                                             date_str, pdf_items,
-                                            ["Item", "Price", "Qty", "Total"], # Total column required?
-                                            [1.0, 4.5, 5.5, 6.5],
-                                            # If Total is required, we need subtotal key
-                                            # "contains only quantities of relevant sources" -> maybe no price/total?
-                                            # But reuse generate_grouped_pdf which expects columns.
-                                            # Let's show Value (Qty * Price) as Total.
-                                            subtotal_indices=None) # No subtotal summing by category requested but maybe nice?
-
-        # Need to populate 'subtotal' if I use "Total" column
-        # Wait, generate_grouped_pdf uses 'subtotal' key if present.
-        # I'll add it.
-        for i in pdf_items:
-            i['subtotal'] = i['qty'] * i['price']
-
-        # Call again with correct data
-        success = self.generate_grouped_pdf(full_path, "BEGINNING INVENTORY",
-                                            date_str, pdf_items,
-                                            ["Item", "Price", "Qty", "Total"],
-                                            [1.0, 4.5, 5.5, 6.5],
+                                            ["Item", "Source", "Stock", "Damaged"],
+                                            [1.0, 4.0, 5.5, 6.5],
                                             subtotal_indices=[2, 3])
 
         if success:
@@ -1435,7 +1432,9 @@ class POSSystem:
                                 for idx in subtotal_indices:
                                     if idx < len(col_pos):
                                         val = cat_sums[idx]
-                                        is_float = (is_summary and idx in [1, 5]) or (not is_summary and idx in [1, 3])
+                                        is_float = False
+                                        if is_summary and idx == 7: is_float = True
+                                        elif not is_summary and "Total" in col_headers and idx == 3: is_float = True
                                         txt = f"{val:.2f}" if is_float else f"{int(val)}"
                                         c.drawString(col_pos[idx] * inch, y - 10, txt)
                             c.drawString(col_pos[-1] * inch - 0.7 * inch, y - 10, "Subtotal:")
@@ -1453,22 +1452,32 @@ class POSSystem:
                 row_vals = []
                 row_txt = []
                 if is_summary:
+                    # ["Product", "Source", "Price", "Added", "Sold", "Stock", "Damaged", "Sales"]
                     price_txt = f"{item['price']:.2f}" if item['price'] > 0 else "-"
-                    row_txt = [item['name'][:35], price_txt, str(int(item['in'])),
-                               str(int(item['out'])), str(int(item['remaining'])), f"{item['sales']:.2f}"]
-                    row_vals = [0, 0, item['in'], item['out'], item['remaining'], item['sales']]
+                    row_txt = [item['name'][:35], item.get('source', '-'), price_txt, str(int(item['in'])),
+                               str(int(item['out'])), str(int(item['remaining'])), str(int(item.get('damaged', 0))), f"{item['sales']:.2f}"]
+                    row_vals = [0, 0, 0, item['in'], item['out'], item['remaining'], item.get('damaged', 0), item['sales']]
                 elif "subtotal" in item:
                     row_txt = [item['name'][:35], f"{item['price']:.2f}", str(int(item['qty'])),
                                f"{item['subtotal']:.2f}"]
                     row_vals = [0, 0, item['qty'], item['subtotal']]
                 elif "new_stock" in item:
+                    # Inventory: Item, Price, Qty Added, Source, New Stock
                     row_txt = [item['name'][:35], f"{item.get('price', 0):.2f}", f"{int(item['qty'])}",
-                               str(int(item.get('new_stock', 0)))]
-                    row_vals = [0, 0, item['qty'], 0]
+                               item.get('source', '-'), str(int(item.get('new_stock', 0)))]
+                    row_vals = [0, 0, item['qty'], 0, 0]
                 elif "qty_final" in item:
                     row_txt = [item['name'][:35], str(int(item['qty_orig'])), f"{int(item['qty']):+}",
                                str(int(item['qty_final']))]
                     row_vals = [0, 0, item['qty'], 0]
+                elif "damaged" in item and "source" in item and "Stock" in col_headers:
+                    # Beginning Inventory: Item, Source, Stock, Damaged
+                    row_txt = [item['name'][:35], item.get('source', '-'), str(int(item['qty'])), str(int(item['damaged']))]
+                    row_vals = [0, 0, item['qty'], item['damaged']]
+                elif "source" in item and len(col_headers) == 3:
+                    # Damaged In: Item, Source, Qty
+                    row_txt = [item['name'][:35], item['source'], f"{int(item['qty'])}"]
+                    row_vals = [0, 0, item['qty']]
                 else:
                     row_txt = [item['name'][:35], f"{item.get('price', 0):.2f}", f"{int(item['qty'])}"]
                     row_vals = [0, 0, item['qty']]
@@ -1484,7 +1493,9 @@ class POSSystem:
                     for idx in subtotal_indices:
                         if idx < len(col_pos):
                             val = cat_sums[idx]
-                            is_float = (is_summary and idx in [1, 5]) or (not is_summary and idx in [1, 3])
+                            is_float = False
+                            if is_summary and idx == 7: is_float = True
+                            elif not is_summary and "Total" in col_headers and idx == 3: is_float = True
                             txt = f"{val:.2f}" if is_float else f"{int(val)}"
                             c.drawString(col_pos[idx] * inch, y - 10, txt)
                 c.drawString(col_pos[-1] * inch - 0.7 * inch, y - 10, "Subtotal:")
@@ -1493,7 +1504,7 @@ class POSSystem:
             c.setFont("Helvetica-Bold", 12)
             lbl = ""
             if is_summary:
-                lbl = f"TOTAL SALES: {grand_sums[5]:.2f}"
+                lbl = f"TOTAL SALES: {grand_sums[7]:.2f}"
             elif items and "subtotal" in items[0]:
                 lbl = f"TOTAL AMOUNT: {grand_sums[3]:.2f}"
             elif is_inventory:
@@ -1648,25 +1659,22 @@ class POSSystem:
             new_stock = (hist['in'] + i['qty']) - hist['out']
             x = i.copy();
             x['new_stock'] = new_stock;
-            # Append source to name for PDF clarity
-            x['name_display'] = f"{x['name']} ({x.get('source', 'Unknown')})"
             p_items.append(x)
 
-        # Update PDF columns to include Source? Or just append to name.
-        # Requirement 2.3: In all receipts, products will be grouped by Source then by Categories.
-        # generate_grouped_pdf groups by 'category'.
-        # I should change 'category' in p_items to be "Source - Category" or just pass a grouping key.
-        # Hack: Modify category field temporarily for PDF generation.
+        # Update PDF columns to include Source
+        # Requirement 4: Inventory PDF Receipts should just have a column for "Source" after Qty. Added.
+        # Instead of modifying category.
 
         pdf_items = []
         for item in p_items:
             c = item.copy()
-            c['category'] = f"{item.get('source', 'General')} - {item.get('category', 'General')}"
+            # No longer hacking category.
+            # c['category'] = f"{item.get('source', 'General')} - {item.get('category', 'General')}"
             pdf_items.append(c)
 
         if self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT",
-                                     date_str, pdf_items, ["Item", "Price", "Qty Added", "New Stock"],
-                                     [1.0, 4.5, 5.5, 6.5], subtotal_indices=[2], is_inventory=True):
+                                     date_str, pdf_items, ["Item", "Price", "Qty Added", "Source", "New Stock"],
+                                     [1.0, 3.5, 4.5, 5.5, 6.8], subtotal_indices=[2], is_inventory=True):
             transaction = {"type": "inventory", "timestamp": date_str, "filename": fname, "items": self.inventory_cart}
             self.ledger.append(transaction);
             self.save_ledger()
@@ -2383,19 +2391,21 @@ class POSSystem:
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
         scrollbar = ttk.Scrollbar(tree_frame);
         scrollbar.pack(side="right", fill="y")
-        self.sum_tree = ttk.Treeview(tree_frame, columns=("cat", "name", "price", "in", "out", "rem", "damaged", "dr_total", "sale"),
+        self.sum_tree = ttk.Treeview(tree_frame, columns=("cat", "name", "price", "in", "source", "out", "rem", "damaged", "dr_total", "sale"),
                                      show="headings", yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.sum_tree.yview)
         self.sum_tree.heading("cat", text="Cat");
         self.sum_tree.heading("name", text="Product")
         self.sum_tree.heading("price", text="Price");
         self.sum_tree.heading("in", text="In");
+        self.sum_tree.heading("source", text="Source");
         self.sum_tree.heading("out", text="Out");
         self.sum_tree.heading("rem", text="Stk");
         self.sum_tree.heading("damaged", text="Dmg");
         self.sum_tree.heading("dr_total", text="DR Tot");
         self.sum_tree.heading("sale", text="Sales")
         for col in ["in", "out", "rem", "damaged", "price", "dr_total"]: self.sum_tree.column(col, width=50)
+        self.sum_tree.column("source", width=80)
         self.sum_tree.pack(fill="both", expand=True)
         self.lbl_sum_info = ttk.Label(self.tab_summary, text="Ready")
         self.lbl_sum_info.pack(pady=2)
@@ -2433,21 +2443,13 @@ class POSSystem:
         period_stats, in_c, out_c, corr_list = self.calculate_stats(period)
         rows = []
         all_names = set(self.products_df['Product Name'].astype(str)) | set(global_stats.keys())
+
         for name in all_names:
             name = name.strip()
-            g_data = global_stats.get(name, {'in': 0, 'out': 0, 'damaged': 0})
+            g_data = global_stats.get(name, {'sources': {}, 'damaged_sources': {}})
+            p_data = period_stats.get(name, {'sales_lines': [], 'in_lines': []})
 
-            # Req 4.3: Damaged Inventory quantity (In - Out - Damaged = Current Stock)
-            # Actually Current Stock = In - Out - Damaged?
-            # Wait, Damaged is separate.
-            # Stock = In - Out - Damaged.
-            # My `calculate_stats` logic for 'new_stock' in Inventory Tab was `(in + qty) - out`.
-            # I should update that logic to `in - out - damaged` for accurate display of sellable stock.
-            # But here we display "remaining".
-            rem_stock = g_data['in'] - g_data['out'] - g_data.get('damaged', 0)
-            damaged_qty = g_data.get('damaged', 0)
-
-            # Lookup product info
+            # Info
             prod_info = self.products_df[self.products_df['Product Name'] == name]
             if not prod_info.empty:
                 dr_price = float(prod_info.iloc[0].get('DR Price', 0.0))
@@ -2457,64 +2459,80 @@ class POSSystem:
                 dr_price = 0.0
                 curr_price = 0.0
                 cat = "Phased Out"
+                if name in global_stats: name = global_stats[name]['name'] + " (Old)"
 
-            p_data = period_stats.get(name, {'in': 0, 'out': 0, 'damaged': 0, 'sales_lines': [], 'in_lines': []})
+            # Activity Map: (Source, Price) -> Data
+            act_map = {} # (src, price) -> {in, out, sales, dr_total}
 
-            # Calculate DR Total for Req 3.1
-            # "Total of (DR Price) x (Sales/Quantity Sold)"
-            # Is this per line or total per product?
-            # "Summaries will now include a 'DR Total', before the total, below which is the total of (DR Price) x (Sales/Quantity Sold)"
-            # This implies a column "DR Total" in the table.
-
-            price_map = {}
-            for line in p_data['sales_lines']:
-                p = line['price']
-                if p not in price_map: price_map[p] = {'in': 0, 'out': 0, 'sales': 0, 'damaged_mv': 0}
-                price_map[p]['out'] += line['qty'];
-                price_map[p]['sales'] += line['amt']
-
+            # Process IN
             for line in p_data['in_lines']:
-                p = line['price']
-                if p not in price_map: price_map[p] = {'in': 0, 'out': 0, 'sales': 0, 'damaged_mv': 0}
-                price_map[p]['in'] += line['qty']
+                key = (line['source'], line['price'])
+                if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0}
+                act_map[key]['in'] += line['qty']
 
-            # If no activity but we need to show stock/damaged
-            if not price_map: price_map[curr_price] = {'in': 0, 'out': 0, 'sales': 0, 'damaged_mv': 0}
+            # Process Sales (OUT)
+            for line in p_data['sales_lines']:
+                breakdown = line.get('breakdown', {})
+                # If no breakdown (legacy), assume Remaining?
+                if not breakdown: breakdown = {'Remaining': line['qty']}
 
-            for price, data in price_map.items():
-                show_rem = rem_stock if price == curr_price else 0
-                show_dmg = damaged_qty if price == curr_price else 0
+                total_qty = line['qty']
+                if total_qty == 0: continue
 
-                # Filter inactive
-                if self.report_type.get() != "All Time":
-                     if data['in'] == 0 and data['out'] == 0 and p_data.get('damaged', 0) == 0: continue
-                elif data['in'] == 0 and data['out'] == 0 and show_rem == 0 and show_dmg == 0 and name not in set(self.products_df['Product Name']):
-                    continue
+                for src, qty in breakdown.items():
+                    if qty == 0: continue
+                    key = (src, line['price'])
+                    if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0}
 
-                if cat == "Phased Out" and name in global_stats: name = global_stats[name]['name'] + " (Old)"
+                    act_map[key]['out'] += qty
+                    # Proportional sales amount
+                    ratio = qty / total_qty
+                    act_map[key]['sales'] += line['amt'] * ratio
+                    # DR Total
+                    act_map[key]['dr_total'] += dr_price * qty
 
-                # Req 3.1: DR Total = DR Price * Quantity Sold (Out)
-                dr_total = dr_price * data['out']
+            # Iterate Sources
+            # We want to show rows for active sources or sources with stock
 
-                rows.append({
-                    'code': "",
-                    'category': cat,
-                    'name': name,
-                    'price': price,
-                    'in': data['in'],
-                    'out': data['out'],
-                    'remaining': show_rem,
-                    'sales': data['sales'],
-                    'damaged': show_dmg, # Req 4.3
-                    'dr_total': dr_total # Req 3.1
-                })
+            for src in SOURCES:
+                # Current Stock/Damaged for this source
+                cur_stock = g_data.get('sources', {}).get(src, 0)
+                cur_dmg = g_data.get('damaged_sources', {}).get(src, 0)
 
-        final_rows = []
-        names_in_excel = set(self.products_df['Product Name'].astype(str))
-        for r in rows:
-            is_active = (r['in'] > 0 or r['out'] > 0 or r['remaining'] > 0 or r['damaged'] > 0 or r['name'] in names_in_excel)
-            if is_active: final_rows.append(r)
-        return final_rows, in_c, out_c, corr_list
+                # Find all prices for this source
+                prices = {k[1] for k in act_map.keys() if k[0] == src}
+
+                if cur_stock > 0 or cur_dmg > 0:
+                    prices.add(curr_price)
+
+                for p in sorted(prices, reverse=True):
+                    d = act_map.get((src, p), {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0})
+
+                    show_rem = 0
+                    show_dmg = 0
+                    if p == curr_price:
+                        show_rem = cur_stock
+                        show_dmg = cur_dmg
+
+                    # Filter: hide if empty line (no activity and no stock shown)
+                    if d['in'] == 0 and d['out'] == 0 and show_rem == 0 and show_dmg == 0:
+                        continue
+
+                    rows.append({
+                        'code': "",
+                        'category': cat,
+                        'name': name,
+                        'source': src,
+                        'price': p,
+                        'in': d['in'],
+                        'out': d['out'],
+                        'remaining': show_rem,
+                        'damaged': show_dmg,
+                        'sales': d['sales'],
+                        'dr_total': d['dr_total']
+                    })
+
+        return rows, in_c, out_c, corr_list
 
     def gen_view(self, override_period=None):
         data, in_c, out_c, corr_list = self.get_sum_data(override_period)
@@ -2533,19 +2551,13 @@ class POSSystem:
         # Old: cat, name, price, in, out, rem, sale
         # New: cat, name, price, in, out, rem, damaged, dr_total, sale
 
-        # Need to reconfigure tree columns dynamically or just set them up once.
-        # Since I can't easily change __init__ setup code without editing setup_summary_tab,
-        # I'll edit setup_summary_tab separately or try to reconfig here if possible.
-        # Ideally I should have updated setup_summary_tab. I will do that in next step.
-        # But for now I'll assume columns exist.
-
         for s in data:
-            # Assuming tree columns are updated
             values = (
                 s['category'],
                 s['name'],
                 f"{s['price']:.2f}",
                 int(s['in']),
+                s['source'],
                 int(s['out']),
                 int(s['remaining']),
                 int(s['damaged']),
@@ -2574,12 +2586,14 @@ class POSSystem:
         fname = f"{prefix}-{now.strftime('%Y%m%d-%H%M%S')}.pdf"
         full_path = os.path.join(SUMMARY_FOLDER, fname)
 
+        # Summary Headers: Product, Source, Price, Added, Sold, Stock, Damaged, Sales
+        # Indices:         0        1       2      3      4     5      6        7
         success = self.generate_grouped_pdf(full_path, "INVENTORY & SALES SUMMARY",
                                             now.strftime('%Y-%m-%d %H:%M:%S'), data,
-                                            ["Product", "Price", "Added", "Sold", "Stock", "Sales"],
-                                            [1.0, 4.5, 5.2, 5.9, 6.6, 7.3], is_summary=True,
+                                            ["Product", "Source", "Price", "Added", "Sold", "Stock", "Damaged", "Sales"],
+                                            [1.0, 3.5, 4.2, 4.8, 5.3, 5.8, 6.4, 7.0], is_summary=True,
                                             extra_info=f"Period: {p_txt} | In: {in_c} | Out: {out_c}",
-                                            subtotal_indices=[2, 3, 5], correction_list=corr_list)
+                                            subtotal_indices=[3, 4, 6, 7], correction_list=corr_list)
         if success:
             if not is_custom_date:
                 self.summary_count += 1
