@@ -1412,26 +1412,45 @@ class POSSystem:
             c = canvas.Canvas(filepath, pagesize=letter)
             width, height = letter
             y = height - 1 * inch
-            c.setFont("Helvetica-Bold", 18)
+
+            # --- HEADER SECTION ---
+            # Modern Official Look: Bold Business Name, distinct from Title
+            c.setFont("Helvetica-Bold", 20)
             c.drawString(1 * inch, y, self.business_name)
-            y -= 0.35 * inch
+            y -= 0.3 * inch
+
             c.setFont("Helvetica-Bold", 14)
-            c.drawString(1 * inch, y, title)
+            c.drawString(1 * inch, y, title.upper()) # Uppercase for official look
             y -= 0.25 * inch
-            c.setFont("Helvetica", 9)
+
+            c.setFont("Helvetica", 10)
             c.drawString(1 * inch, y, APP_TITLE)
             y -= 0.2 * inch
-            c.setFont("Helvetica", 10)
+
             c.drawString(1 * inch, y, f"Date: {date_str}")
             y -= 0.2 * inch
             c.drawString(1 * inch, y, f"User: {self.session_user}")
             if extra_info:
                 y -= 0.2 * inch
                 c.drawString(1 * inch, y, extra_info)
-            y -= 0.5 * inch
-            c.setFont("Helvetica-Bold", 9)
-            for i, h in enumerate(col_headers): c.drawString(col_pos[i] * inch, y, h)
-            c.line(1 * inch, y - 5, 7.5 * inch, y - 5)
+
+            y -= 0.2 * inch
+            # Separator Line for Header
+            c.setLineWidth(1.5)
+            c.line(1 * inch, y, 7.5 * inch, y)
+            c.setLineWidth(1)
+            y -= 0.4 * inch
+
+            # --- TABLE HEADERS ---
+            c.setFont("Helvetica-Bold", 10)
+            for i, h in enumerate(col_headers):
+                # Ensure we strictly follow col_pos.
+                # If col_pos[0] is 1.0, it aligns with left margin.
+                c.drawString(col_pos[i] * inch, y, h)
+
+            y -= 8
+            c.setLineWidth(1) # Standard line width
+            c.line(1 * inch, y, 7.5 * inch, y)
             y -= 20
 
             def sort_key(x):
@@ -1448,35 +1467,50 @@ class POSSystem:
                 if y < 1 * inch:
                     c.showPage();
                     y = height - 1 * inch
+
                 cat = item.get('category', 'Uncategorized')
                 if cat != current_cat:
+                    # Category Subtotal Logic
                     if current_cat is not None:
+                        # Draw subtotal line
                         if not is_inventory and not "qty_final" in item:
-                            c.setFont("Helvetica-Bold", 9)
+                            c.setLineWidth(0.5)
                             c.line(col_pos[-1] * inch - 0.5 * inch, y + 2, 7.5 * inch, y + 2)
+
+                            c.setFont("Helvetica-Bold", 9)
                             if subtotal_indices:
                                 for idx in subtotal_indices:
                                     if idx < len(col_pos):
                                         val = cat_sums[idx]
                                         is_float = False
-                                        if is_summary and idx == 7: is_float = True
+                                        if is_summary and idx == 7: is_float = True # Sales col
                                         elif not is_summary and "Total" in col_headers and idx == 3: is_float = True
+
                                         txt = f"{val:.2f}" if is_float else f"{int(val)}"
                                         c.drawString(col_pos[idx] * inch, y - 10, txt)
+
                             c.drawString(col_pos[-1] * inch - 0.7 * inch, y - 10, "Subtotal:")
                             y -= 30
                         else:
-                            y -= 10
+                            y -= 10 # Just space if no subtotal needed
+
+                    # New Category Header
+                    # Aesthetic: Bold Black, no blue. Maybe a small gap before.
+                    if y < height - 2*inch: # Don't add gap if top of page
+                         y -= 5
+
                     c.setFont("Helvetica-Bold", 11)
-                    c.setFillColor("blue")
+                    c.setFillColor("black") # Modern black
                     c.drawString(1 * inch, y, f"Category: {cat}")
-                    c.setFillColor("black")
                     y -= 15
                     current_cat = cat
                     cat_sums = [0] * len(col_headers)
+
+                # --- ROW ITEMS ---
                 c.setFont("Helvetica", 9)
                 row_vals = []
                 row_txt = []
+
                 if is_summary:
                     # ["Product", "Source", "Price", "Added", "Sold", "Stock", "Damaged", "Sales"]
                     price_txt = f"{item['price']:.2f}" if item['price'] > 0 else "-"
@@ -1507,14 +1541,18 @@ class POSSystem:
                 else:
                     row_txt = [item['name'][:35], f"{item.get('price', 0):.2f}", f"{int(item['qty'])}"]
                     row_vals = [0, 0, item['qty']]
+
                 for i, txt in enumerate(row_txt): c.drawString(col_pos[i] * inch, y, txt)
                 for i, val in enumerate(row_vals):
                     cat_sums[i] += val
                     grand_sums[i] += val
-                y -= 15
+                y -= 15 # Row spacing
+
+            # Last Category Subtotal
             if current_cat is not None and not is_inventory and not "qty_final" in items[0] if items else False:
-                c.setFont("Helvetica-Bold", 9)
+                c.setLineWidth(0.5)
                 c.line(col_pos[-1] * inch - 0.5 * inch, y + 2, 7.5 * inch, y + 2)
+                c.setFont("Helvetica-Bold", 9)
                 if subtotal_indices:
                     for idx in subtotal_indices:
                         if idx < len(col_pos):
@@ -1526,7 +1564,13 @@ class POSSystem:
                             c.drawString(col_pos[idx] * inch, y - 10, txt)
                 c.drawString(col_pos[-1] * inch - 0.7 * inch, y - 10, "Subtotal:")
                 y -= 30
-            c.line(1 * inch, y + 10, 7.5 * inch, y + 10)
+
+            # --- GRAND TOTAL ---
+            # Double line for grand total
+            c.setLineWidth(1)
+            c.line(1 * inch, y + 5, 7.5 * inch, y + 5)
+            # c.line(1 * inch, y + 8, 7.5 * inch, y + 8) # Optional double line
+
             c.setFont("Helvetica-Bold", 12)
             lbl = ""
             if is_summary:
@@ -1535,7 +1579,9 @@ class POSSystem:
                 lbl = f"TOTAL AMOUNT: {grand_sums[3]:.2f}"
             elif is_inventory:
                 lbl = f"TOTAL ADDED: {int(grand_sums[2])}"
-            c.drawString(4.5 * inch, y, lbl)
+
+            # Right align total slightly better
+            c.drawString(4.5 * inch, y - 10, lbl)
             if is_summary:
                 # Add DR Total Breakdown Table
                 dr_breakdown_items = []
@@ -1566,9 +1612,11 @@ class POSSystem:
 
                     # Table Header
                     hdrs = ["Item", "DR Price", "Qty Added", "Subtotal"]
+                    # Updated coords for alignment
                     h_pos = [1.0, 4.0, 5.5, 6.5]
                     c.setFont("Helvetica-Bold", 9)
                     for i, h in enumerate(hdrs): c.drawString(h_pos[i] * inch, y, h)
+                    c.setLineWidth(1)
                     c.line(1 * inch, y - 5, 7.5 * inch, y - 5)
                     y -= 20
 
@@ -1754,7 +1802,7 @@ class POSSystem:
 
         if self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT",
                                      date_str, pdf_items, ["Item", "Price", "Qty Added", "Source", "New Stock"],
-                                     [1.0, 3.5, 4.5, 5.5, 6.8], subtotal_indices=[2], is_inventory=True):
+                                     [1.0, 3.2, 4.0, 5.0, 6.5], subtotal_indices=[2], is_inventory=True):
             transaction = {"type": "inventory", "timestamp": date_str, "filename": fname, "items": self.inventory_cart}
             self.ledger.append(transaction);
             self.save_ledger()
@@ -2673,7 +2721,7 @@ class POSSystem:
         success = self.generate_grouped_pdf(full_path, "INVENTORY & SALES SUMMARY",
                                             now.strftime('%Y-%m-%d %H:%M:%S'), data,
                                             ["Product", "Source", "Price", "Added", "Sold", "Stock", "Damaged", "Sales"],
-                                            [0.5, 3.2, 4.0, 4.5, 5.0, 5.5, 6.2, 7.0], is_summary=True,
+                                            [1.0, 3.0, 4.2, 4.8, 5.3, 5.8, 6.3, 6.8], is_summary=True,
                                             extra_info=f"Period: {p_txt} | In: {in_c} | Out: {out_c}",
                                             subtotal_indices=[3, 4, 6, 7], correction_list=corr_list)
         if success:
@@ -2862,7 +2910,7 @@ class POSSystem:
                 items = entry.get('items', [])
                 if entry['type'] == "inventory":
                     self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT", date_str,
-                                              items, ["Item", "Price", "Qty Added", "New Stock"], [1.0, 4.5, 5.5, 6.5],
+                                              items, ["Item", "Price", "Qty Added", "New Stock"], [1.0, 3.2, 4.0, 5.0, 6.5],
                                               subtotal_indices=[2], is_inventory=True)
                 elif entry['type'] == "sales":
                     self.generate_grouped_pdf(os.path.join(RECEIPT_FOLDER, fname), "SALES RECEIPT", date_str, items,
@@ -2934,7 +2982,7 @@ class POSSystem:
                         fname = f"Inventory_{curr_date.strftime('%Y%m%d')}-080000.pdf"
                         self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT", ts,
                                                   inv_items, ["Item", "Price", "Qty Added", "Source", "New Stock"],
-                                                  [1.0, 3.5, 4.5, 5.5, 6.8], subtotal_indices=[2], is_inventory=True)
+                                                  [1.0, 3.2, 4.0, 5.0, 6.5], subtotal_indices=[2], is_inventory=True)
                         self.ledger.append(
                             {"type": "inventory", "timestamp": ts, "filename": fname, "items": inv_items})
 
