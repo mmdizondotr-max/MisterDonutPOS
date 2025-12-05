@@ -122,7 +122,7 @@ MOBILE_HTML_TEMPLATE = """
                     <option value="Delivery Receipt">Delivery Receipt</option>
                     <option value="Remaining">Remaining</option>
                     <option value="Transfers">Transfers</option>
-                    <option value="Beverages">Beverages</option>
+                    <option value="O_Beverages">O_Beverages</option>
                 </select>
             </div>
 
@@ -1067,8 +1067,8 @@ class POSSystem:
             rem_dmg = damaged_sources.get("Remaining", 0)
 
             # Check Beverages
-            bev_qty = sources.get("Beverages", 0)
-            bev_dmg = damaged_sources.get("Beverages", 0)
+            bev_qty = sources.get("O_Beverages", 0)
+            bev_dmg = damaged_sources.get("O_Beverages", 0)
 
             # Also get price and category from product info
             code, name_real, price, cat = self.get_product_details(name)
@@ -1081,11 +1081,11 @@ class POSSystem:
             if bev_qty > 0 or bev_dmg > 0:
                 report_items.append({
                     "name": name, "qty": bev_qty, "damaged": bev_dmg,
-                    "source": "Beverages", "price": price, "category": cat
+                    "source": "O_Beverages", "price": price, "category": cat
                 })
 
         if not report_items:
-             messagebox.showinfo("Info", "No stock or damaged items in Remaining or Beverages to report.")
+             messagebox.showinfo("Info", "No stock or damaged items in Remaining or O_Beverages to report.")
              self.config["last_bi_date"] = now.strftime("%Y-%m-%d")
              self.save_config()
              return
@@ -1492,7 +1492,10 @@ class POSSystem:
                                         txt = f"{val:.2f}" if is_float else f"{int(val)}"
                                         c.drawString(col_pos[idx] * inch, y - 10, txt)
 
-                            c.drawString(col_pos[-1] * inch - 0.7 * inch, y - 10, "Subtotal:")
+                            if is_summary:
+                                c.drawString(col_pos[0] * inch, y - 10, "Subtotal:")
+                            else:
+                                c.drawString(col_pos[-1] * inch - 0.7 * inch, y - 10, "Subtotal:")
                             y -= 30
                         else:
                             y -= 10 # Just space if no subtotal needed
@@ -1565,7 +1568,10 @@ class POSSystem:
                             elif not is_summary and "Total" in col_headers and idx == 3: is_float = True
                             txt = f"{val:.2f}" if is_float else f"{int(val)}"
                             c.drawString(col_pos[idx] * inch, y - 10, txt)
-                c.drawString(col_pos[-1] * inch - 0.7 * inch, y - 10, "Subtotal:")
+                if is_summary:
+                    c.drawString(col_pos[0] * inch, y - 10, "Subtotal:")
+                else:
+                    c.drawString(col_pos[-1] * inch - 0.7 * inch, y - 10, "Subtotal:")
                 y -= 30
 
             # --- GRAND TOTAL ---
@@ -2059,7 +2065,7 @@ class POSSystem:
             depletion_breakdown = {}
 
             # 2.4 Order of depletion
-            depletion_order = ["Remaining", "Delivery Receipt", "Transfers", "Beverages"]
+            depletion_order = ["Remaining", "Delivery Receipt", "Transfers", "O_Beverages"]
 
             for source in depletion_order:
                 if qty_needed <= 0: break
