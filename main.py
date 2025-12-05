@@ -15,6 +15,8 @@ import re  # Restore import re
 from PIL import Image, ImageTk
 from style_manager import StyleManager
 
+#Terminal Commands when newly cloned to PyCharm
+# pip install pandas openpyxl reportlab pypdf ntplib Pillow pyinstaller
 # pyinstaller --onefile --noconsole --splash splash_image.png main.py
 
 # --- CONFIGURATION ---
