@@ -16,7 +16,7 @@ from PIL import Image, ImageTk
 from style_manager import StyleManager
 
 #Terminal Commands when newly cloned to PyCharm
-# pip install pandas openpyxl reportlab pypdf ntplib Pillow pyinstaller
+# pip install pandas openpyxl reportlab pypdf ntplib Pillow pyinstaller flask
 # pyinstaller --onefile --noconsole --splash splash_image.png main.py
 
 # --- CONFIGURATION ---
