@@ -30,7 +30,7 @@ CONFIG_FILE = "config.json"
 LEDGER_FILE = "ledger.json"
 APP_TITLE = "MMD Internal POS v1.0MD"
 
-SOURCES = ["Remaining", "Delivery Receipt", "Transfers", "Beverages"]
+SOURCES = ["Remaining", "Delivery Receipt", "Transfers", "O_Beverages"]
 
 # --- EMAIL SENDER CONFIGURATION ---
 SMTP_SERVER = "smtp.gmail.com"
@@ -839,12 +839,12 @@ class POSSystem:
 
     def load_products(self):
         req_cols = ["Business Name", "Product Category", "Product Name", "Price",
-                    "Src_DeliveryReceipt", "Src_Remaining", "Src_Transfers", "Src_Beverages", "DR Price"]
+                    "Src_DeliveryReceipt", "Src_Remaining", "Src_Transfers", "Src_O_Beverages", "DR Price"]
 
         if not os.path.exists(DATA_FILE):
             # Create template with new columns if not exists
             df = pd.DataFrame(columns=req_cols)
-            df.loc[0] = ["My Business", "General", "Sample Product", 100.00, 1, 1, 1, 1, 0.0]
+            df.loc[0] = ["My Business", "General", "Sample Product", 100.00, 1, 1, 1, 0, 0.0]
             try:
                 df.to_excel(DATA_FILE, index=False)
             except:
@@ -883,33 +883,34 @@ class POSSystem:
             if name in seen_names: is_valid = False
             if not name or name.lower() == 'nan': is_valid = False
 
-            # Source Validation: At least one source must be defined (True/1)
-            # If columns are missing in Excel, we assume default 1?
-            # Requirement: "A product without a defined Source should be marked as error"
-            # This implies if the COLUMNS exist and all are 0/False, or if missing we might need strict check.
-            # I will check existence of columns. If missing, I assume 0 and fail?
-            # Or if missing, maybe old format -> Default to Remaining?
-            # Let's be strict but forgiving on missing columns if they haven't updated Excel structure yet.
-            # If Excel has NO Src columns, maybe warn user?
-            # But here we assume structure is updated.
-
             src_flags = {}
             has_at_least_one_source = False
+            is_o_bev = False
+            other_sources = False
 
             for src in SOURCES:
+                # Handle old column names gracefully (Beverages -> O_Beverages)
                 col_name = f"Src_{src.replace(' ', '')}"
-                # If column missing, treat as False/0 (Strict validation per request)
-                # But to avoid breaking existing setups immediately without manual update,
-                # if ALL src columns are missing, maybe we shouldn't reject everything?
-                # But requirement is specific. I will default to 0.
+                # For compatibility, if Src_O_Beverages missing, check Src_Beverages
+                if src == "O_Beverages" and col_name not in row and "Src_Beverages" in row:
+                     val = row.get("Src_Beverages", 0)
+                else:
+                     val = row.get(col_name, 0)
 
-                val = row.get(col_name, 0)
                 if pd.isna(val): val = 0
                 is_src_active = bool(int(val)) if str(val).isdigit() else bool(val)
-                src_flags[col_name] = is_src_active # Store with column name for DataFrame compatibility
-                if is_src_active: has_at_least_one_source = True
+                src_flags[col_name] = is_src_active
+
+                if is_src_active:
+                    has_at_least_one_source = True
+                    if src == "O_Beverages": is_o_bev = True
+                    else: other_sources = True
 
             if not has_at_least_one_source:
+                is_valid = False
+
+            # Validation: O_Beverages cannot have other sources
+            if is_o_bev and other_sources:
                 is_valid = False
 
             if is_valid:
@@ -1033,12 +1034,8 @@ class POSSystem:
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
         last_bi_date = self.config.get("last_bi_date", "")
         if last_bi_date != today_str:
-             # Requirement 5.2: "When a Beginning Inventory is prompted... it will now instead generate a 'Beginning Inventory' receipt..."
-             # The prompt logic exists. I just need to change what happens when accepted.
-            resp = messagebox.askyesno("Daily Reminder",
-                                       "Beginning Inventory has not been generated for today.\n"
-                                       "Do you want to generate now?")
-            if resp: self.generate_beginning_inventory_report()
+            # Auto-generate report
+            self.generate_beginning_inventory_report()
 
     def generate_beginning_inventory_report(self):
         # Requirement 5.2: List of current stocks of products from "Remaining" and "Beverage".
@@ -1106,11 +1103,18 @@ class POSSystem:
         if success:
             self.config["last_bi_date"] = now.strftime("%Y-%m-%d")
             self.save_config()
-            note = f"Note: Beginning Inventory Report."
-            # Email sync feature should be applied accordingly.
-            self.trigger_email_send(full_path, extra_body=note)
-            messagebox.showinfo("Auto-Gen",
-                                f"Beginning Inventory generated & emailed.\nFile: {fname}")
+
+            # Check if email is configured
+            recipient = self.config.get("recipient_email", "").strip()
+            if recipient:
+                if messagebox.askyesno("Beginning Inventory", f"Beginning Inventory generated: {fname}\n\nEmail to {recipient}?"):
+                    note = f"Note: Beginning Inventory Report."
+                    self.trigger_email_send(full_path, extra_body=note)
+                    messagebox.showinfo("Sent", "Email sent.")
+                else:
+                    messagebox.showinfo("Generated", f"Beginning Inventory generated: {fname}")
+            else:
+                messagebox.showinfo("Generated", f"Beginning Inventory generated: {fname}")
 
     def get_dropdown_values(self):
         if not self.products_df.empty:
@@ -1512,6 +1516,56 @@ class POSSystem:
             elif is_inventory:
                 lbl = f"TOTAL ADDED: {int(grand_sums[2])}"
             c.drawString(4.5 * inch, y, lbl)
+            if is_summary:
+                # Add DR Total Breakdown Table
+                dr_breakdown_items = []
+                for item in items:
+                    # dr_total is calculated for "Delivery Receipt" lines
+                    if item.get('source') == "Delivery Receipt" and item.get('dr_total', 0) > 0:
+                        # Find the product's DR Price. item['dr_total'] = qty_in * dr_price
+                        # We need to reverse engineer dr_price or pass it in data.
+                        # Actually 'data' passed to gen_pdf has 'dr_total' already.
+                        # item['in'] is Qty Added.
+                        qty_added = item.get('in', 0)
+                        if qty_added > 0:
+                            dr_price_calc = item['dr_total'] / qty_added
+                            dr_breakdown_items.append({
+                                "name": item['name'],
+                                "dr_price": dr_price_calc,
+                                "qty": qty_added,
+                                "subtotal": item['dr_total']
+                            })
+
+                if dr_breakdown_items:
+                    y -= 40
+                    if y < 2 * inch: c.showPage(); y = height - 1 * inch
+
+                    c.setFont("Helvetica-Bold", 12)
+                    c.drawString(1 * inch, y, "DR TOTAL BREAKDOWN (New Stock from Delivery Receipt)")
+                    y -= 20
+
+                    # Table Header
+                    hdrs = ["Item", "DR Price", "Qty Added", "Subtotal"]
+                    h_pos = [1.0, 4.0, 5.5, 6.5]
+                    c.setFont("Helvetica-Bold", 9)
+                    for i, h in enumerate(hdrs): c.drawString(h_pos[i] * inch, y, h)
+                    c.line(1 * inch, y - 5, 7.5 * inch, y - 5)
+                    y -= 20
+
+                    grand_dr_total = 0
+                    c.setFont("Helvetica", 9)
+                    for d_item in dr_breakdown_items:
+                        if y < 1 * inch: c.showPage(); y = height - 1 * inch
+                        row_t = [d_item['name'][:40], f"{d_item['dr_price']:.2f}", str(int(d_item['qty'])), f"{d_item['subtotal']:.2f}"]
+                        for i, txt in enumerate(row_t): c.drawString(h_pos[i] * inch, y, txt)
+                        grand_dr_total += d_item['subtotal']
+                        y -= 15
+
+                    c.line(1 * inch, y + 5, 7.5 * inch, y + 5)
+                    c.setFont("Helvetica-Bold", 10)
+                    c.drawString(5.5 * inch, y - 10, f"GRAND TOTAL: {grand_dr_total:.2f}")
+                    y -= 30
+
             if is_summary and correction_list:
                 y -= 40
                 if y < 1 * inch: c.showPage(); y = height - 1 * inch
@@ -1553,8 +1607,11 @@ class POSSystem:
 
         ttk.Label(top_bar, text="Source:", style="Inventory.TLabel").pack(side="left")
         self.inv_source_var = tk.StringVar()
-        self.inv_source_combo = ttk.Combobox(top_bar, textvariable=self.inv_source_var, values=SOURCES, width=15, state="readonly")
-        self.inv_source_combo.set(SOURCES[0])
+        # Filter out Remaining from UI dropdown
+        ui_sources = [s for s in SOURCES if s != "Remaining"]
+        self.inv_source_combo = ttk.Combobox(top_bar, textvariable=self.inv_source_var, values=ui_sources, width=15, state="readonly")
+        if ui_sources:
+             self.inv_source_combo.set(ui_sources[0])
         self.inv_source_combo.pack(side="left", padx=5)
 
         ttk.Label(top_bar, text="Qty:", style="Inventory.TLabel").pack(side="left")
@@ -1598,6 +1655,7 @@ class POSSystem:
         if not row.empty:
             valid_sources = []
             for src in SOURCES:
+                if src == "Remaining": continue # Skip remaining for UI
                 col = f"Src_{src.replace(' ', '')}"
                 if row.iloc[0].get(col, True):
                     valid_sources.append(src)
@@ -2471,6 +2529,9 @@ class POSSystem:
                 key = (line['source'], line['price'])
                 if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0}
                 act_map[key]['in'] += line['qty']
+                # DR Total is now calculated on STOCK IN for Delivery Receipt
+                if line['source'] == "Delivery Receipt":
+                    act_map[key]['dr_total'] += dr_price * line['qty']
 
             # Process Sales (OUT)
             for line in p_data['sales_lines']:
@@ -2490,8 +2551,6 @@ class POSSystem:
                     # Proportional sales amount
                     ratio = qty / total_qty
                     act_map[key]['sales'] += line['amt'] * ratio
-                    # DR Total
-                    act_map[key]['dr_total'] += dr_price * qty
 
             # Iterate Sources
             # We want to show rows for active sources or sources with stock
@@ -2590,10 +2649,11 @@ class POSSystem:
 
         # Summary Headers: Product, Source, Price, Added, Sold, Stock, Damaged, Sales
         # Indices:         0        1       2      3      4     5      6        7
+        # Updated spacing to prevent overlap
         success = self.generate_grouped_pdf(full_path, "INVENTORY & SALES SUMMARY",
                                             now.strftime('%Y-%m-%d %H:%M:%S'), data,
                                             ["Product", "Source", "Price", "Added", "Sold", "Stock", "Damaged", "Sales"],
-                                            [1.0, 3.5, 4.2, 4.8, 5.3, 5.8, 6.4, 7.0], is_summary=True,
+                                            [0.5, 3.2, 4.0, 4.5, 5.0, 5.5, 6.2, 7.0], is_summary=True,
                                             extra_info=f"Period: {p_txt} | In: {in_c} | Out: {out_c}",
                                             subtotal_indices=[3, 4, 6, 7], correction_list=corr_list)
         if success:
@@ -2856,6 +2916,46 @@ class POSSystem:
                                                   [1.0, 4.5, 5.5, 6.5], subtotal_indices=[2], is_inventory=True)
                         self.ledger.append(
                             {"type": "inventory", "timestamp": ts, "filename": fname, "items": inv_items})
+
+                    # Simulate Damaged In (every week)
+                    dmg_items = []
+                    for _ in range(random.randint(1, 3)):
+                         p = random.choice(products)
+                         if stock_tracker[p['name']] > 0:
+                             qty_dmg = 1
+                             stock_tracker[p['name']] -= qty_dmg
+                             # Naive: assume damage from Remaining
+                             dmg_items.append({"name": p['name'], "qty": qty_dmg, "source": "Remaining", "price": p['price'], "category": p['category']})
+                    if dmg_items:
+                        ts_dmg = f"{date_str_base} 18:00:00"
+                        fname_dmg = f"DamagedIn_{curr_date.strftime('%Y%m%d')}-180000.pdf"
+
+                        # Fix for ledger items needing source_breakdown for stats calc
+                        ledger_dmg_items = []
+                        for i in dmg_items:
+                            li = i.copy()
+                            li['source_breakdown'] = {i['source']: i['qty']}
+                            ledger_dmg_items.append(li)
+
+                        self.ledger.append({"type": "damaged_in", "timestamp": ts_dmg, "filename": fname_dmg, "items": ledger_dmg_items})
+
+                    # Simulate Returns (Damaged Out)
+                    if random.random() > 0.7:
+                         # Just random return
+                         p = random.choice(products)
+                         ret_items = [{"name": p['name'], "qty": 1, "price": p['price']}]
+                         ts_ret = f"{date_str_base} 19:00:00"
+                         fname_ret = f"Returns_{curr_date.strftime('%Y%m%d')}-190000.pdf"
+                         self.ledger.append({"type": "damaged_out", "timestamp": ts_ret, "filename": fname_ret, "items": ret_items})
+
+                # Simulate Daily Rollover (Move DR/Transfers -> Remaining)
+                # Just inject a dummy transaction at start of day (00:01)
+                # This is complex to simulate perfectly without running calculate_stats iteratively,
+                # but we can just add a dummy marker transaction or simple move if we tracked source-level stock in this simulation.
+                # Since stock_tracker is simple int, we won't simulate exact source moves here, but we will add the transaction entry.
+                ts_roll = f"{date_str_base} 00:01:00"
+                self.ledger.append({"type": "inventory", "timestamp": ts_roll, "filename": "AUTO_ROLLOVER_SIM", "items": []})
+
                 num_sales = random.randint(5, 10)
                 for s_i in range(num_sales):
                     sales_items = []
