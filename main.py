@@ -974,6 +974,11 @@ class POSSystem:
         items_to_move = []
 
         for name, data in stats.items():
+            # Check if product is O_Beverage
+            _, _, _, _, is_o_bev = self.get_product_details_extended(name)
+            if is_o_bev:
+                continue
+
             sources = data.get('sources', {})
             dr_qty = sources.get("Delivery Receipt", 0)
             tr_qty = sources.get("Transfers", 0)
@@ -1123,11 +1128,26 @@ class POSSystem:
         return []
 
     def get_product_details(self, selection_string):
-        if not selection_string: return "", None, 0, "Uncategorized"
+        code, name, price, cat, _ = self.get_product_details_extended(selection_string)
+        return code, name, price, cat
+
+    def get_product_details_extended(self, selection_string):
+        # Returns: code, name, price, category, is_o_beverage
+        if not selection_string: return "", None, 0, "Uncategorized", False
+
+        # Helper to extract O_Beverage flag
+        def check_bev(row):
+            # Check Src_O_Beverages or Src_Beverages
+            if "Src_O_Beverages" in row:
+                return bool(row["Src_O_Beverages"])
+            if "Src_Beverages" in row:
+                return bool(row["Src_Beverages"])
+            return False
+
         exact_row = self.products_df[self.products_df['Product Name'] == selection_string]
         if not exact_row.empty:
             row = exact_row.iloc[0]
-            return "", row['Product Name'], float(row['Price']), row['Product Category']
+            return "", row['Product Name'], float(row['Price']), row['Product Category'], check_bev(row)
         try:
             name_part = selection_string.rsplit(" (", 1)[0]
         except:
@@ -1135,8 +1155,8 @@ class POSSystem:
         item_row = self.products_df[self.products_df['Product Name'] == name_part]
         if not item_row.empty:
             row = item_row.iloc[0]
-            return "", row['Product Name'], float(row['Price']), row['Product Category']
-        return "", "Unknown Item", 0.0, "Phased Out"
+            return "", row['Product Name'], float(row['Price']), row['Product Category'], check_bev(row)
+        return "", "Unknown Item", 0.0, "Phased Out", False
 
     def refresh_stock_cache(self):
         self.current_stock_cache, _, _, _ = self.calculate_stats(None)
@@ -2907,13 +2927,14 @@ class POSSystem:
                         if needed > 0:
                             stock_tracker[p['name']] += needed
                             inv_items.append({"code": "", "name": p['name'], "price": p['price'], "qty": needed,
-                                              "category": p['category'], "new_stock": stock_tracker[p['name']]})
+                                              "category": p['category'], "source": "Remaining",
+                                              "new_stock": stock_tracker[p['name']]})
                     if inv_items:
                         ts = f"{date_str_base} 08:00:00"
                         fname = f"Inventory_{curr_date.strftime('%Y%m%d')}-080000.pdf"
                         self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT", ts,
-                                                  inv_items, ["Item", "Price", "Qty Added", "New Stock"],
-                                                  [1.0, 4.5, 5.5, 6.5], subtotal_indices=[2], is_inventory=True)
+                                                  inv_items, ["Item", "Price", "Qty Added", "Source", "New Stock"],
+                                                  [1.0, 3.5, 4.5, 5.5, 6.8], subtotal_indices=[2], is_inventory=True)
                         self.ledger.append(
                             {"type": "inventory", "timestamp": ts, "filename": fname, "items": inv_items})
 
