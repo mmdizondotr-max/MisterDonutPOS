@@ -1234,7 +1234,7 @@ class POSSystem:
                         'name': name,
                         'in': 0, 'out': 0, 'damaged': 0,
                         'sources': {s: 0 for s in SOURCES},
-                        'sales_lines': [], 'in_lines': [],
+                        'sales_lines': [], 'in_lines': [], 'returns_lines': [],
                         'damaged_sources': {s: 0 for s in SOURCES} # To track where damaged items came from
                     }
 
@@ -1271,7 +1271,7 @@ class POSSystem:
                             'name': name,
                             'in': 0, 'out': 0, 'damaged': 0,
                             'sources': {s: 0 for s in SOURCES},
-                            'sales_lines': [], 'in_lines': [],
+                            'sales_lines': [], 'in_lines': [], 'returns_lines': [],
                             'damaged_sources': {s: 0 for s in SOURCES}
                         }
 
@@ -1354,6 +1354,9 @@ class POSSystem:
 
                          stats[name]['damaged'] -= qty
 
+                         if in_period:
+                             stats[name]['returns_lines'].append({'qty': qty, 'source': 'Damaged'})
+
                     elif t_type == 'correction':
                         # Correction is tricky with sources.
                         # If ref was sales/damaged, we are reversing an OUT.
@@ -1407,7 +1410,7 @@ class POSSystem:
         return stats, in_count, out_count, corrections_in_period
 
     def generate_grouped_pdf(self, filepath, title, date_str, items, col_headers, col_pos, is_summary=False,
-                             extra_info="", subtotal_indices=None, is_inventory=False, correction_list=None):
+                             extra_info="", subtotal_indices=None, is_inventory=False, correction_list=None, returns_breakdown=None):
         try:
             c = canvas.Canvas(filepath, pagesize=letter)
             width, height = letter
@@ -1633,6 +1636,48 @@ class POSSystem:
                     c.setFont("Helvetica-Bold", 10)
                     c.drawString(5.5 * inch, y - 10, f"GRAND TOTAL: {grand_dr_total:.2f}")
                     y -= 30
+
+            if is_summary and returns_breakdown:
+                y -= 20
+                if y < 2 * inch: c.showPage(); y = height - 1 * inch
+
+                c.setFont("Helvetica-Bold", 12)
+                c.drawString(1 * inch, y, "RETURNS BREAKDOWN (Damaged Out)")
+                y -= 20
+
+                # Table Header
+                hdrs = ["Item", "Qty Returned"]
+                h_pos = [1.0, 5.5]
+                c.setFont("Helvetica-Bold", 9)
+                for i, h in enumerate(hdrs): c.drawString(h_pos[i] * inch, y, h)
+                c.setLineWidth(1)
+                c.line(1 * inch, y - 5, 7.5 * inch, y - 5)
+                y -= 20
+
+                grand_ret_total = 0
+                c.setFont("Helvetica", 9)
+
+                # Consolidate returns by product for display?
+                # Usually user wants list of returns. If we have duplicate product lines in returns_breakdown (from multiple transactions), maybe sum them?
+                # But breakdown list was flattened from transactions.
+                # Let's group by name.
+                grouped_returns = {}
+                for r in returns_breakdown:
+                    nm = r['name']
+                    if nm not in grouped_returns: grouped_returns[nm] = 0
+                    grouped_returns[nm] += r['qty']
+
+                for r_name, r_qty in grouped_returns.items():
+                    if y < 1 * inch: c.showPage(); y = height - 1 * inch
+                    row_t = [r_name[:40], str(int(r_qty))]
+                    for i, txt in enumerate(row_t): c.drawString(h_pos[i] * inch, y, txt)
+                    grand_ret_total += r_qty
+                    y -= 15
+
+                c.line(1 * inch, y + 5, 7.5 * inch, y + 5)
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(4.5 * inch, y - 10, f"TOTAL RETURNED: {int(grand_ret_total)}")
+                y -= 30
 
             if is_summary and correction_list:
                 y -= 40
@@ -2519,7 +2564,7 @@ class POSSystem:
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
         scrollbar = ttk.Scrollbar(tree_frame);
         scrollbar.pack(side="right", fill="y")
-        self.sum_tree = ttk.Treeview(tree_frame, columns=("cat", "name", "price", "in", "source", "out", "rem", "damaged", "dr_total", "sale"),
+        self.sum_tree = ttk.Treeview(tree_frame, columns=("cat", "name", "price", "in", "source", "out", "rem", "damaged", "dr_total", "returns", "sale"),
                                      show="headings", yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.sum_tree.yview)
         self.sum_tree.heading("cat", text="Cat");
@@ -2531,8 +2576,9 @@ class POSSystem:
         self.sum_tree.heading("rem", text="Stk");
         self.sum_tree.heading("damaged", text="Dmg");
         self.sum_tree.heading("dr_total", text="DR Tot");
+        self.sum_tree.heading("returns", text="Returns");
         self.sum_tree.heading("sale", text="Sales")
-        for col in ["in", "out", "rem", "damaged", "price", "dr_total"]: self.sum_tree.column(col, width=50)
+        for col in ["in", "out", "rem", "damaged", "price", "dr_total", "returns"]: self.sum_tree.column(col, width=50)
         self.sum_tree.column("source", width=80)
         self.sum_tree.pack(fill="both", expand=True)
         self.lbl_sum_info = ttk.Label(self.tab_summary, text="Ready")
@@ -2570,12 +2616,13 @@ class POSSystem:
         period = override_period if override_period else self.get_period_dates()
         period_stats, in_c, out_c, corr_list = self.calculate_stats(period)
         rows = []
+        returns_breakdown = [] # Collect all returns for PDF
         all_names = set(self.products_df['Product Name'].astype(str)) | set(global_stats.keys())
 
         for name in all_names:
             name = name.strip()
             g_data = global_stats.get(name, {'sources': {}, 'damaged_sources': {}})
-            p_data = period_stats.get(name, {'sales_lines': [], 'in_lines': []})
+            p_data = period_stats.get(name, {'sales_lines': [], 'in_lines': [], 'returns_lines': []})
 
             # Info
             prod_info = self.products_df[self.products_df['Product Name'] == name]
@@ -2590,12 +2637,12 @@ class POSSystem:
                 if name in global_stats: name = global_stats[name]['name'] + " (Old)"
 
             # Activity Map: (Source, Price) -> Data
-            act_map = {} # (src, price) -> {in, out, sales, dr_total}
+            act_map = {} # (src, price) -> {in, out, sales, dr_total, returns}
 
             # Process IN
             for line in p_data['in_lines']:
                 key = (line['source'], line['price'])
-                if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0}
+                if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
                 act_map[key]['in'] += line['qty']
                 # DR Total is now calculated on STOCK IN for Delivery Receipt
                 if line['source'] == "Delivery Receipt":
@@ -2613,12 +2660,26 @@ class POSSystem:
                 for src, qty in breakdown.items():
                     if qty == 0: continue
                     key = (src, line['price'])
-                    if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0}
+                    if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
 
                     act_map[key]['out'] += qty
                     # Proportional sales amount
                     ratio = qty / total_qty
                     act_map[key]['sales'] += line['amt'] * ratio
+
+            # Process Returns (Damaged Out)
+            for line in p_data.get('returns_lines', []):
+                key = ('Remaining', curr_price) # Default
+
+                if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
+                act_map[key]['returns'] += line['qty']
+
+                # Add to flattened breakdown list
+                returns_breakdown.append({
+                    "name": name,
+                    "qty": line['qty'],
+                    "price": curr_price
+                })
 
             # Iterate Sources
             # We want to show rows for active sources or sources with stock
@@ -2635,7 +2696,7 @@ class POSSystem:
                     prices.add(curr_price)
 
                 for p in sorted(prices, reverse=True):
-                    d = act_map.get((src, p), {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0})
+                    d = act_map.get((src, p), {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0})
 
                     show_rem = 0
                     show_dmg = 0
@@ -2644,7 +2705,7 @@ class POSSystem:
                         show_dmg = cur_dmg
 
                     # Filter: hide if empty line (no activity and no stock shown)
-                    if d['in'] == 0 and d['out'] == 0 and show_rem == 0 and show_dmg == 0:
+                    if d['in'] == 0 and d['out'] == 0 and show_rem == 0 and show_dmg == 0 and d['returns'] == 0:
                         continue
 
                     rows.append({
@@ -2658,13 +2719,14 @@ class POSSystem:
                         'remaining': show_rem,
                         'damaged': show_dmg,
                         'sales': d['sales'],
-                        'dr_total': d['dr_total']
+                        'dr_total': d['dr_total'],
+                        'returns': d['returns']
                     })
 
-        return rows, in_c, out_c, corr_list
+        return rows, in_c, out_c, corr_list, returns_breakdown
 
     def gen_view(self, override_period=None):
-        data, in_c, out_c, corr_list = self.get_sum_data(override_period)
+        data, in_c, out_c, corr_list, returns_breakdown = self.get_sum_data(override_period)
         for i in self.sum_tree.get_children(): self.sum_tree.delete(i)
 
         def sort_key(x):
@@ -2678,7 +2740,7 @@ class POSSystem:
 
         # Adjust tree columns for new fields
         # Old: cat, name, price, in, out, rem, sale
-        # New: cat, name, price, in, out, rem, damaged, dr_total, sale
+        # New: cat, name, price, in, out, rem, damaged, dr_total, returns, sale
 
         for s in data:
             values = (
@@ -2691,6 +2753,7 @@ class POSSystem:
                 int(s['remaining']),
                 int(s['damaged']),
                 f"{s['dr_total']:.2f}",
+                int(s.get('returns', 0)),
                 f"{s['sales']:.2f}"
             )
             self.sum_tree.insert("", "end", values=values)
@@ -2704,11 +2767,11 @@ class POSSystem:
                 p_txt = f"{s.strftime('%m-%d')} to {e.strftime('%m-%d')}"
 
         self.lbl_sum_info.config(text=f"Period: {p_txt} | Sales: {tot:.2f} | DR Total: {dr_grand_total:.2f}")
-        return data, tot, p_txt, in_c, out_c, corr_list
+        return data, tot, p_txt, in_c, out_c, corr_list, returns_breakdown
 
     def gen_pdf(self):
         is_custom_date = self.chk_custom_date_var.get()
-        data, tot, p_txt, in_c, out_c, corr_list = self.gen_view()
+        data, tot, p_txt, in_c, out_c, corr_list, returns_breakdown = self.gen_view()
         now = self.get_time()
 
         prefix = "History" if is_custom_date else "Summary"
@@ -2717,13 +2780,17 @@ class POSSystem:
 
         # Summary Headers: Product, Source, Price, Added, Sold, Stock, Damaged, Sales
         # Indices:         0        1       2      3      4     5      6        7
-        # Updated spacing to prevent overlap
+        # Updated spacing to prevent overlap (Damaged vs Sales)
+        # Previous: [1.0, 3.0, 4.2, 4.8, 5.3, 5.8, 6.3, 6.8]
+        # Damaged at 6.3, Sales at 6.8 (0.5 diff)
+        # New Plan: Move Sales to 7.0, Damaged to 6.3 (0.7 diff), or shift more
+        # Let's try: [1.0, 3.0, 4.1, 4.7, 5.2, 5.7, 6.2, 6.9]
         success = self.generate_grouped_pdf(full_path, "INVENTORY & SALES SUMMARY",
                                             now.strftime('%Y-%m-%d %H:%M:%S'), data,
                                             ["Product", "Source", "Price", "Added", "Sold", "Stock", "Damaged", "Sales"],
-                                            [1.0, 3.0, 4.2, 4.8, 5.3, 5.8, 6.3, 6.8], is_summary=True,
+                                            [1.0, 3.0, 4.1, 4.7, 5.2, 5.7, 6.2, 6.9], is_summary=True,
                                             extra_info=f"Period: {p_txt} | In: {in_c} | Out: {out_c}",
-                                            subtotal_indices=[3, 4, 6, 7], correction_list=corr_list)
+                                            subtotal_indices=[3, 4, 6, 7], correction_list=corr_list, returns_breakdown=returns_breakdown)
         if success:
             if not is_custom_date:
                 self.summary_count += 1
@@ -2973,9 +3040,18 @@ class POSSystem:
                         target_level = weekly_demand_est + safety_stock
                         needed = target_level - current_qty
                         if needed > 0:
+                            # Round up to nearest 10
+                            import math
+                            needed = math.ceil(needed / 10) * 10
+
                             stock_tracker[p['name']] += needed
+
+                            # Determine Source: O_Beverage or Delivery Receipt
+                            _, _, _, _, is_o_bev = self.get_product_details_extended(p['name'])
+                            src = "O_Beverages" if is_o_bev else "Delivery Receipt"
+
                             inv_items.append({"code": "", "name": p['name'], "price": p['price'], "qty": needed,
-                                              "category": p['category'], "source": "Remaining",
+                                              "category": p['category'], "source": src,
                                               "new_stock": stock_tracker[p['name']]})
                     if inv_items:
                         ts = f"{date_str_base} 08:00:00"
@@ -2988,13 +3064,28 @@ class POSSystem:
 
                     # Simulate Damaged In (every week)
                     dmg_items = []
-                    for _ in range(random.randint(1, 3)):
+                    for _ in range(random.randint(2, 5)): # Increased frequency slightly to ensure damaged items appear
                          p = random.choice(products)
                          if stock_tracker[p['name']] > 0:
                              qty_dmg = 1
                              stock_tracker[p['name']] -= qty_dmg
-                             # Naive: assume damage from Remaining
-                             dmg_items.append({"name": p['name'], "qty": qty_dmg, "source": "Remaining", "price": p['price'], "category": p['category']})
+
+                             # Damage comes from stock. Stock was added to Delivery Receipt (or O_Bev).
+                             # If we are same day as stock in, it is in DR.
+                             # If rolled over, it is in Remaining.
+                             # Simulation logic: 08:00 Stock In. 18:00 Damage In.
+                             # So on stock day, it should come from DR.
+
+                             _, _, _, _, is_o_bev = self.get_product_details_extended(p['name'])
+                             if is_o_bev:
+                                 src = "O_Beverages"
+                             else:
+                                 # Simplification: Assume damage from DR if stock just came in, else Remaining?
+                                 # To be safe in simulation context where we don't track per-source history perfectly:
+                                 # We just added to "Delivery Receipt". So take from there.
+                                 src = "Delivery Receipt"
+
+                             dmg_items.append({"name": p['name'], "qty": qty_dmg, "source": src, "price": p['price'], "category": p['category']})
                     if dmg_items:
                         ts_dmg = f"{date_str_base} 18:00:00"
                         fname_dmg = f"DamagedIn_{curr_date.strftime('%Y%m%d')}-180000.pdf"
