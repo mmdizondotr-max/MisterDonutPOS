@@ -3018,129 +3018,409 @@ class POSSystem:
                                    "This will DELETE ALL DATA and generate dummy data for the last 30 days.\n\nAre you sure?"): return
         self.ledger = [];
         self.summary_count = 0
-        for folder in [INVENTORY_FOLDER, RECEIPT_FOLDER, CORRECTION_FOLDER]:
+        for folder in [INVENTORY_FOLDER, RECEIPT_FOLDER, CORRECTION_FOLDER, DAMAGED_FOLDER]:
             if os.path.exists(folder): shutil.rmtree(folder); os.makedirs(folder)
         if self.products_df.empty: messagebox.showerror("Error", "No products loaded from products.xlsx"); return
+
+        import math
+
+        # --- Internal Stock Tracker for Simulation ---
+        class StockTracker:
+            def __init__(self, products):
+                self.state = {} # name -> {Remaining:0, DR:0, Trans:0, Bev:0, Damaged:0}
+                for p in products:
+                    self.state[p['name']] = {
+                        "Remaining": 0, "Delivery Receipt": 0, "Transfers": 0, "Beverages": 0,
+                        "Damaged": 0, "Morning_DR_Stock": 0
+                    }
+
+            def add_stock(self, name, source, qty):
+                if name in self.state:
+                    self.state[name][source] = self.state[name].get(source, 0) + qty
+                    return self.get_total_stock(name)
+                return 0
+
+            def get_total_stock(self, name):
+                if name not in self.state: return 0
+                s = self.state[name]
+                return s["Remaining"] + s["Delivery Receipt"] + s["Transfers"] + s["Beverages"]
+
+            def get_source_stock(self, name, source):
+                return self.state.get(name, {}).get(source, 0)
+
+            def get_damaged(self, name):
+                return self.state.get(name, {}).get("Damaged", 0)
+
+            def rollover(self, name, is_o_bev):
+                if name not in self.state: return
+                if is_o_bev: return # O_Beverages do not rollover to Remaining
+                s = self.state[name]
+                # Move DR and Transfers to Remaining
+                to_move = s["Delivery Receipt"] + s["Transfers"]
+                s["Remaining"] += to_move
+                s["Delivery Receipt"] = 0
+                s["Transfers"] = 0
+                s["Morning_DR_Stock"] = 0 # Reset morning stock tracker for new day
+
+            def deplete(self, name, qty_needed):
+                # Depletion order: Remaining, Delivery Receipt, Transfers, Beverages
+                breakdown = {}
+                if name not in self.state: return {}
+                s = self.state[name]
+
+                # Check total available first
+                total = self.get_total_stock(name)
+                if qty_needed > total:
+                    qty_needed = total # Clamp to available
+
+                if qty_needed <= 0: return {}
+
+                remaining_to_take = qty_needed
+                for src in ["Remaining", "Delivery Receipt", "Transfers", "Beverages"]:
+                    if remaining_to_take <= 0: break
+                    avail = s[src]
+                    if avail > 0:
+                        take = min(avail, remaining_to_take)
+                        s[src] -= take
+                        breakdown[src] = take
+                        remaining_to_take -= take
+
+                return breakdown
+
+            def damage_remaining(self, name):
+                if name not in self.state: return 0
+                s = self.state[name]
+                qty = s["Remaining"]
+                if qty > 0:
+                    s["Remaining"] = 0
+                    s["Damaged"] += qty
+                return qty
+
+            def return_damaged(self, name, qty):
+                if name not in self.state: return 0
+                s = self.state[name]
+                avail = s["Damaged"]
+                if qty > avail: qty = avail # Clamp
+                s["Damaged"] -= qty
+                return qty
+
+        # --- Helper: Generate Ledger/PDF for Sales ---
+        def create_sales_transaction(timestamp, items, fname):
+            # items dict needs: name, price, qty, category
+            # We calculate subtotal and depletion here
+            final_items = []
+            grouped_for_pdf = []
+
+            for i in items:
+                name = i['name']
+                qty = i['qty']
+                if qty <= 0: continue
+                breakdown = tracker.deplete(name, qty)
+                if not breakdown: continue # No stock available
+
+                total_fulfilled = sum(breakdown.values())
+                i['qty'] = total_fulfilled # Adjust if clamped
+                i['subtotal'] = i['price'] * total_fulfilled
+                i['source_breakdown'] = breakdown
+
+                final_items.append(i)
+
+                # For PDF grouping
+                for src, s_qty in breakdown.items():
+                    c = i.copy()
+                    c['qty'] = s_qty
+                    c['subtotal'] = s_qty * i['price']
+                    c['category'] = f"{src} - {i['category']}" # Group by source
+                    grouped_for_pdf.append(c)
+
+            if not final_items: return
+
+            self.generate_grouped_pdf(os.path.join(RECEIPT_FOLDER, fname), "SALES RECEIPT", timestamp, grouped_for_pdf,
+                                      ["Item", "Price", "Qty", "Total"], [1.0, 4.5, 5.5, 6.5], subtotal_indices=[2, 3])
+
+            self.ledger.append({"type": "sales", "timestamp": timestamp, "filename": fname, "items": final_items})
+
+
+        # --- PREPARE DATA ---
         products = []
         for _, row in self.products_df.iterrows():
-            products.append(
-                {"name": row['Product Name'], "price": float(row['Price']), "category": row['Product Category']})
-        stock_tracker = {p['name']: 0 for p in products}
+            _, _, _, _, is_o_bev = self.get_product_details_extended(row['Product Name'])
+            products.append({
+                "name": row['Product Name'],
+                "price": float(row['Price']),
+                "category": row['Product Category'],
+                "is_o_bev": is_o_bev
+            })
+
+        tracker = StockTracker(products)
         start_date = datetime.datetime.now() - datetime.timedelta(days=30)
+
         try:
             for day_offset in range(31):
                 curr_date = start_date + datetime.timedelta(days=day_offset)
-                date_str_base = curr_date.strftime("%Y-%m-%d")
-                if day_offset % 7 == 0 or day_offset == 30:
-                    inv_items = []
-                    for p in products:
-                        current_qty = stock_tracker[p['name']]
-                        weekly_demand_est = 21;
-                        safety_stock = random.randint(10, 20);
-                        target_level = weekly_demand_est + safety_stock
-                        needed = target_level - current_qty
-                        if needed > 0:
-                            # Round up to nearest 10
-                            import math
-                            needed = math.ceil(needed / 10) * 10
+                date_str = curr_date.strftime("%Y-%m-%d")
 
-                            stock_tracker[p['name']] += needed
+                # 1. ROLLOVER (00:01)
+                for p in products:
+                    tracker.rollover(p['name'], p['is_o_bev'])
 
-                            # Determine Source: O_Beverage or Delivery Receipt
-                            _, _, _, _, is_o_bev = self.get_product_details_extended(p['name'])
-                            src = "O_Beverages" if is_o_bev else "Delivery Receipt"
+                self.ledger.append({
+                    "type": "inventory",
+                    "timestamp": f"{date_str} 00:01:00",
+                    "filename": "AUTO_ROLLOVER_SIM",
+                    "items": []
+                })
 
-                            inv_items.append({"code": "", "name": p['name'], "price": p['price'], "qty": needed,
-                                              "category": p['category'], "source": src,
-                                              "new_stock": stock_tracker[p['name']]})
-                    if inv_items:
-                        ts = f"{date_str_base} 08:00:00"
-                        fname = f"Inventory_{curr_date.strftime('%Y%m%d')}-080000.pdf"
-                        self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT", ts,
-                                                  inv_items, ["Item", "Price", "Qty Added", "Source", "New Stock"],
+                # 2. PLANNING (High Sales Day Logic)
+                is_high_sales_day = (day_offset % 7 == 5) # e.g., Every 6th day (Friday/Saturday)
+
+                # Target Sales
+                target_sales_amt = random.randint(4000, 10000)
+
+                # Distribute target sales to products to find required stock
+                # We simply assign random weights to products to determine their share
+                daily_product_mix = []
+                for p in products:
+                    weight = random.random()
+                    daily_product_mix.append({"p": p, "w": weight})
+
+                total_weight = sum(x["w"] for x in daily_product_mix)
+
+                morning_stock_items = []
+
+                for item in daily_product_mix:
+                    p = item["p"]
+                    share = item["w"] / total_weight
+                    target_revenue = target_sales_amt * share
+
+                    if p['price'] > 0:
+                        # Logic: Stock = (TargetSales / Price) / 0.88
+                        target_qty = int((target_revenue / p['price']) / 0.88)
+                    else:
+                        target_qty = 0
+
+                    # Round up to nearest 10
+                    if target_qty > 0:
+                        target_qty = math.ceil(target_qty / 10) * 10
+
+                        src = "O_Beverages" if p['is_o_bev'] else "Delivery Receipt"
+
+                        new_total = tracker.add_stock(p['name'], src, target_qty)
+
+                        # Track Morning DR Stock for Returns Calculation later
+                        if src == "Delivery Receipt":
+                            tracker.state[p['name']]["Morning_DR_Stock"] += target_qty
+
+                        morning_stock_items.append({
+                            "code": "", "name": p['name'], "price": p['price'],
+                            "qty": target_qty, "category": p['category'],
+                            "source": src, "new_stock": new_total
+                        })
+
+                # 3. STOCKING (08:00)
+                if morning_stock_items:
+                    ts = f"{date_str} 08:00:00"
+                    fname = f"Inventory_{curr_date.strftime('%Y%m%d')}-080000.pdf"
+
+                    # PDF Items (add explicit source column logic if needed, but generate_grouped_pdf uses generic keys)
+                    pdf_items = []
+                    for i in morning_stock_items:
+                        c = i.copy()
+                        # c['category'] = f"{i['source']} - {i['category']}"
+                        # Using new column "Source" in PDF instead of category hack
+                        pdf_items.append(c)
+
+                    self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT", ts,
+                                              pdf_items, ["Item", "Price", "Qty Added", "Source", "New Stock"],
+                                              [1.0, 3.2, 4.0, 5.0, 6.5], subtotal_indices=[2], is_inventory=True)
+                    self.ledger.append({"type": "inventory", "timestamp": ts, "filename": fname, "items": morning_stock_items})
+
+                # 4. SALES (Morning 09:00 - 12:00)
+                # Sales randomness: +/- 12% of target
+                actual_sales_factor = random.uniform(0.88, 1.12) # +/- 12%
+
+                # Split sales into Morning (30%) and Afternoon (70%)
+                # If High Sales Day, Morning is higher? Or stock runs out by 3PM.
+
+                # Let's generate a queue of sales transactions for the day
+                sales_events = []
+
+                # Create sales events
+                sales_start_hour = 9
+                sales_end_hour = 20
+
+                if is_high_sales_day:
+                    actual_sales_factor = 1.50 # 150% sales
+
+                total_daily_sales_target = target_sales_amt * actual_sales_factor
+
+                current_generated_sales = 0
+                while current_generated_sales < total_daily_sales_target:
+                    # Pick random product
+                    p = random.choice(products)
+                    qty = random.randint(1, 3)
+                    amt = p['price'] * qty
+
+                    # Distribute time
+                    # If high sales day, condense transactions before 3PM (15:00) mainly
+                    if is_high_sales_day:
+                        h = random.randint(9, 15) # Up to 3PM mostly
+                        # Small chance of later sales (if we restock)
+                        if random.random() > 0.8: h = random.randint(15, 20)
+                    else:
+                        h = random.randint(9, 20)
+
+                    m = random.randint(0, 59)
+
+                    sales_events.append({"p": p, "qty": qty, "h": h, "m": m, "amt": amt})
+                    current_generated_sales += amt
+
+                # Sort events by time
+                sales_events.sort(key=lambda x: x['h'] * 60 + x['m'])
+
+                # Process Events
+                current_batch = []
+                batch_time_min = -1
+
+                for ev in sales_events:
+                    ev_time_min = ev['h'] * 60 + ev['m']
+
+                    # Check for 12:00 Damage Event
+                    if batch_time_min < (12*60) and ev_time_min >= (12*60):
+                        # Flush current batch
+                        if current_batch:
+                            ts_batch = f"{date_str} {int(batch_time_min/60):02d}:{batch_time_min%60:02d}:00"
+                            fname_batch = f"{curr_date.strftime('%Y%m%d')}-{int(batch_time_min/60):02d}{batch_time_min%60:02d}00.pdf"
+                            create_sales_transaction(ts_batch, current_batch, fname_batch)
+                            current_batch = []
+
+                        # EXECUTE DAMAGE LOGIC (12:00)
+                        dmg_items = []
+                        for p in products:
+                            # Damages come from Remaining
+                            q = tracker.damage_remaining(p['name'])
+                            if q > 0:
+                                dmg_items.append({
+                                    "name": p['name'], "qty": q, "source": "Remaining",
+                                    "price": p['price'], "category": p['category'],
+                                    "source_breakdown": {"Remaining": q}
+                                })
+
+                        if dmg_items:
+                            ts_dmg = f"{date_str} 12:00:00"
+                            fname_dmg = f"DamagedIn_{curr_date.strftime('%Y%m%d')}-120000.pdf"
+
+                            pdf_items_d = []
+                            for i in dmg_items:
+                                c = i.copy()
+                                c['category'] = f"Remaining - {i['category']}"
+                                pdf_items_d.append(c)
+
+                            self.generate_grouped_pdf(os.path.join(DAMAGED_FOLDER, fname_dmg), "DAMAGED INVENTORY (IN)",
+                                                     ts_dmg, pdf_items_d, ["Item", "Source", "Qty"],
+                                                     [1.0, 4.5, 6.5], subtotal_indices=[2])
+
+                            self.ledger.append({"type": "damaged_in", "timestamp": ts_dmg, "filename": fname_dmg, "items": dmg_items})
+
+                    # Check for 15:00 High Sales Restock
+                    if is_high_sales_day and batch_time_min < (15*60) and ev_time_min >= (15*60):
+                         # Flush batch
+                        if current_batch:
+                            ts_batch = f"{date_str} {int(batch_time_min/60):02d}:{batch_time_min%60:02d}:00"
+                            fname_batch = f"{curr_date.strftime('%Y%m%d')}-{int(batch_time_min/60):02d}{batch_time_min%60:02d}00.pdf"
+                            create_sales_transaction(ts_batch, current_batch, fname_batch)
+                            current_batch = []
+
+                        # RESTOCK FROM TRANSFERS
+                        # Calculate what we need for the REST of the day?
+                        # Or just dump a big transfer.
+                        # We want 150% total. We stocked for 100%/0.88 ~ 113%.
+                        # If sales were aggressive, we might be out.
+                        # Let's assess remaining demand in `sales_events` after 15:00
+                        remaining_demand = {}
+                        for fev in sales_events:
+                            if (fev['h'] * 60 + fev['m']) >= (15*60):
+                                nm = fev['p']['name']
+                                remaining_demand[nm] = remaining_demand.get(nm, 0) + fev['qty']
+
+                        transfer_items = []
+                        for nm, qty in remaining_demand.items():
+                             # Add a buffer
+                             qty_to_add = math.ceil((qty * 1.2) / 10) * 10
+                             if qty_to_add > 0:
+                                 new_tot = tracker.add_stock(nm, "Transfers", qty_to_add)
+                                 # Find price/cat
+                                 prod_ref = next((x for x in products if x['name'] == nm), None)
+                                 transfer_items.append({
+                                     "code": "", "name": nm, "price": prod_ref['price'],
+                                     "qty": qty_to_add, "category": prod_ref['category'],
+                                     "source": "Transfers", "new_stock": new_tot
+                                 })
+
+                        if transfer_items:
+                            ts_tr = f"{date_str} 15:00:00"
+                            fname_tr = f"Inventory_Transfer_{curr_date.strftime('%Y%m%d')}-150000.pdf"
+
+                            self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname_tr), "INVENTORY RECEIPT", ts_tr,
+                                                  transfer_items, ["Item", "Price", "Qty Added", "Source", "New Stock"],
                                                   [1.0, 3.2, 4.0, 5.0, 6.5], subtotal_indices=[2], is_inventory=True)
-                        self.ledger.append(
-                            {"type": "inventory", "timestamp": ts, "filename": fname, "items": inv_items})
+                            self.ledger.append(
+                                {"type": "inventory", "timestamp": ts_tr, "filename": fname_tr, "items": transfer_items})
 
-                    # Simulate Damaged In (every week)
-                    dmg_items = []
-                    for _ in range(random.randint(2, 5)): # Increased frequency slightly to ensure damaged items appear
-                         p = random.choice(products)
-                         if stock_tracker[p['name']] > 0:
-                             qty_dmg = 1
-                             stock_tracker[p['name']] -= qty_dmg
+                    # Add event to batch
+                    if batch_time_min == -1 or abs((ev['h']*60 + ev['m']) - batch_time_min) < 30: # Group by 30 mins roughly
+                         if batch_time_min == -1: batch_time_min = ev['h']*60 + ev['m']
+                         current_batch.append({
+                             "name": ev['p']['name'], "price": ev['p']['price'],
+                             "qty": ev['qty'], "category": ev['p']['category']
+                         })
+                    else:
+                        # Process batch
+                        ts_batch = f"{date_str} {int(batch_time_min/60):02d}:{batch_time_min%60:02d}:00"
+                        fname_batch = f"{curr_date.strftime('%Y%m%d')}-{int(batch_time_min/60):02d}{batch_time_min%60:02d}00.pdf"
+                        create_sales_transaction(ts_batch, current_batch, fname_batch)
 
-                             # Damage comes from stock. Stock was added to Delivery Receipt (or O_Bev).
-                             # If we are same day as stock in, it is in DR.
-                             # If rolled over, it is in Remaining.
-                             # Simulation logic: 08:00 Stock In. 18:00 Damage In.
-                             # So on stock day, it should come from DR.
+                        current_batch = [{
+                             "name": ev['p']['name'], "price": ev['p']['price'],
+                             "qty": ev['qty'], "category": ev['p']['category']
+                        }]
+                        batch_time_min = ev['h']*60 + ev['m']
 
-                             _, _, _, _, is_o_bev = self.get_product_details_extended(p['name'])
-                             if is_o_bev:
-                                 src = "O_Beverages"
-                             else:
-                                 # Simplification: Assume damage from DR if stock just came in, else Remaining?
-                                 # To be safe in simulation context where we don't track per-source history perfectly:
-                                 # We just added to "Delivery Receipt". So take from there.
-                                 src = "Delivery Receipt"
+                # Flush final batch
+                if current_batch:
+                    ts_batch = f"{date_str} {int(batch_time_min/60):02d}:{batch_time_min%60:02d}:00"
+                    fname_batch = f"{curr_date.strftime('%Y%m%d')}-{int(batch_time_min/60):02d}{batch_time_min%60:02d}00.pdf"
+                    create_sales_transaction(ts_batch, current_batch, fname_batch)
 
-                             dmg_items.append({"name": p['name'], "qty": qty_dmg, "source": src, "price": p['price'], "category": p['category']})
-                    if dmg_items:
-                        ts_dmg = f"{date_str_base} 18:00:00"
-                        fname_dmg = f"DamagedIn_{curr_date.strftime('%Y%m%d')}-180000.pdf"
+                # 5. RETURNS (End of Day 21:00)
+                # Max 8% of Delivery Receipt Sourced Items (Morning Stock)
+                # Check Damaged Inventory
+                returns_items = []
+                for p in products:
+                    damaged = tracker.get_damaged(p['name'])
+                    if damaged > 0:
+                        # Get morning stock
+                        morning_qty = tracker.state[p['name']]["Morning_DR_Stock"]
+                        max_return = int(morning_qty * 0.08)
 
-                        # Fix for ledger items needing source_breakdown for stats calc
-                        ledger_dmg_items = []
-                        for i in dmg_items:
-                            li = i.copy()
-                            li['source_breakdown'] = {i['source']: i['qty']}
-                            ledger_dmg_items.append(li)
+                        if max_return > 0:
+                            to_return = min(damaged, max_return)
+                            if to_return > 0:
+                                tracker.return_damaged(p['name'], to_return)
+                                returns_items.append({
+                                    "name": p['name'], "qty": to_return, "price": p['price'], "category": p['category']
+                                })
 
-                        self.ledger.append({"type": "damaged_in", "timestamp": ts_dmg, "filename": fname_dmg, "items": ledger_dmg_items})
+                if returns_items:
+                    ts_ret = f"{date_str} 21:00:00"
+                    fname_ret = f"Returns_{curr_date.strftime('%Y%m%d')}-210000.pdf"
 
-                    # Simulate Returns (Damaged Out)
-                    if random.random() > 0.7:
-                         # Just random return
-                         p = random.choice(products)
-                         ret_items = [{"name": p['name'], "qty": 1, "price": p['price']}]
-                         ts_ret = f"{date_str_base} 19:00:00"
-                         fname_ret = f"Returns_{curr_date.strftime('%Y%m%d')}-190000.pdf"
-                         self.ledger.append({"type": "damaged_out", "timestamp": ts_ret, "filename": fname_ret, "items": ret_items})
+                    self.generate_grouped_pdf(os.path.join(DAMAGED_FOLDER, fname_ret), "RETURNS RECEIPT",
+                                             ts_ret, returns_items, ["Item", "Price", "Qty"],
+                                             [1.0, 4.5, 5.5], subtotal_indices=[2])
 
-                # Simulate Daily Rollover (Move DR/Transfers -> Remaining)
-                # Just inject a dummy transaction at start of day (00:01)
-                # This is complex to simulate perfectly without running calculate_stats iteratively,
-                # but we can just add a dummy marker transaction or simple move if we tracked source-level stock in this simulation.
-                # Since stock_tracker is simple int, we won't simulate exact source moves here, but we will add the transaction entry.
-                ts_roll = f"{date_str_base} 00:01:00"
-                self.ledger.append({"type": "inventory", "timestamp": ts_roll, "filename": "AUTO_ROLLOVER_SIM", "items": []})
+                    self.ledger.append({"type": "damaged_out", "timestamp": ts_ret, "filename": fname_ret, "items": returns_items})
 
-                num_sales = random.randint(5, 10)
-                for s_i in range(num_sales):
-                    sales_items = []
-                    num_lines = random.randint(1, 5)
-                    attempts = 0
-                    while len(sales_items) < num_lines and attempts < 20:
-                        attempts += 1;
-                        p = random.choice(products)
-                        if any(x['name'] == p['name'] for x in sales_items): continue
-                        qty = random.randint(1, 3)
-                        if stock_tracker[p['name']] >= qty:
-                            stock_tracker[p['name']] -= qty;
-                            sub = p['price'] * qty
-                            sales_items.append(
-                                {"code": "", "name": p['name'], "price": p['price'], "qty": qty, "subtotal": sub,
-                                 "category": p['category']})
-                    if sales_items:
-                        hour = 9 + (s_i % 9);
-                        minute = random.randint(0, 59)
-                        ts = f"{date_str_base} {hour:02d}:{minute:02d}:{random.randint(10, 59)}"
-                        fname = f"{curr_date.strftime('%Y%m%d')}-{hour:02d}{minute:02d}{random.randint(10, 59)}.pdf"
-                        self.generate_grouped_pdf(os.path.join(RECEIPT_FOLDER, fname), "SALES RECEIPT", ts, sales_items,
-                                                  ["Item", "Price", "Qty", "Total"], [1.0, 4.5, 5.5, 6.5],
-                                                  subtotal_indices=[2, 3])
-                        self.ledger.append({"type": "sales", "timestamp": ts, "filename": fname, "items": sales_items})
             self.save_ledger();
             self.refresh_stock_cache()
             messagebox.showinfo("Load Test", "Simulation Complete.\nData overwritten.")
