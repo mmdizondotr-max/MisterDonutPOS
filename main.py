@@ -42,6 +42,7 @@ pd = None
 canvas = None
 letter = None
 inch = None
+PdfWriter = None  # Add placeholder
 Flask = None
 request = None
 jsonify = None
@@ -758,7 +759,8 @@ class POSSystem:
             "cached_business_name": "My Business",
             "previous_products": [],
             "recipient_email": "",
-            "last_bi_date": ""
+            "last_bi_date": "",
+            "last_successful_summary_time": ""
         }
         if os.path.exists(CONFIG_FILE):
             try:
@@ -1172,7 +1174,7 @@ class POSSystem:
         regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
         return re.match(regex, email) is not None
 
-    def send_email_thread(self, recipient, subject, body, attachment_paths=None, is_test=False):
+    def send_email_thread(self, recipient, subject, body, attachment_paths=None, is_test=False, on_success=None):
         def task():
             try:
                 msg = MIMEMultipart()
@@ -1199,6 +1201,8 @@ class POSSystem:
                     self.root.after(0, lambda: messagebox.showinfo("Email Success", f"Test email sent to {recipient}"))
                 else:
                     print(f"Email sent successfully to {recipient}")
+                    if on_success:
+                         self.root.after(0, on_success)
             except Exception as e:
                 err_msg = str(e)
                 if is_test:
@@ -1211,12 +1215,70 @@ class POSSystem:
     def trigger_email_send(self, summary_pdf_path, extra_body=""):
         recipient = self.config.get("recipient_email", "").strip()
         if not recipient or not self.validate_email_format(recipient): return
-        date_str = datetime.datetime.now().strftime("%Y%m%d")
+
+        now = datetime.datetime.now()
+        date_str = now.strftime("%Y%m%d")
         safe_biz_name = "".join(c for c in self.business_name if c.isalnum() or c in (' ', '_', '-')).strip()
         subject = f"[{self.summary_count:04d}]_{APP_TITLE}_{safe_biz_name}_{date_str}"
-        body = f"Summary & Ledger.\n\nUser: {self.session_user}\nCounter: {self.summary_count:04d}\nTime: {datetime.datetime.now()}\n\n{extra_body}"
+        body = f"Summary & Ledger.\n\nUser: {self.session_user}\nCounter: {self.summary_count:04d}\nTime: {now}\n\n{extra_body}"
         attachments = [summary_pdf_path, LEDGER_FILE]
-        self.send_email_thread(recipient, subject, body, attachments, is_test=False)
+
+        # --- Catch-up Logic ---
+        last_success_ts = self.config.get("last_successful_summary_time", "")
+        digest_path = None
+
+        if last_success_ts:
+            try:
+                last_dt = datetime.datetime.strptime(last_success_ts, '%Y-%m-%d %H:%M:%S')
+
+                # Check for files in summary folder older than now but newer than last_dt
+                # We need to find the "first summary generated but unsent".
+                # Standard format: Summary-YYYYMMDD-HHMMSS.pdf or History-...
+                # We rely on filename timestamps.
+
+                earliest_unsent_time = None
+                earliest_file = None
+
+                for f in os.listdir(SUMMARY_FOLDER):
+                    if f.startswith("Summary-") and f.endswith(".pdf"):
+                         # Extract timestamp
+                         # Summary-20231027-100000.pdf
+                         try:
+                             ts_part = f.replace("Summary-", "").replace(".pdf", "")
+                             f_dt = datetime.datetime.strptime(ts_part, '%Y%m%d-%H%M%S')
+
+                             if f_dt > last_dt and f_dt < now:
+                                 # Potential unsent summary
+                                 if earliest_unsent_time is None or f_dt < earliest_unsent_time:
+                                     earliest_unsent_time = f_dt
+                                     earliest_file = f
+                         except:
+                             pass
+
+                if earliest_unsent_time:
+                    # We have a gap start (earliest_unsent_time) and gap end (now)
+                    # Generate digest
+                    print(f"Generating digest for gap: {earliest_unsent_time} to {now}")
+                    digest_path = self.generate_catchup_digest(earliest_unsent_time, now)
+                    if digest_path and os.path.exists(digest_path):
+                        attachments.append(digest_path)
+                        body += "\n\n[Attached: Digest of missed summaries]"
+
+            except Exception as e:
+                print(f"Error in catch-up logic: {e}")
+
+        def on_email_success():
+            # Update last successful time
+            self.config["last_successful_summary_time"] = now.strftime('%Y-%m-%d %H:%M:%S')
+            self.save_config()
+            # If digest was created, we can delete it now or leave it?
+            # Usually leave it in folder or delete. Let's delete to save space?
+            # Or keep it. Summary folder might get big.
+            # But the user might want to see it.
+            # However, `generate_catchup_digest` puts it in SUMMARY_FOLDER.
+            pass
+
+        self.send_email_thread(recipient, subject, body, attachments, is_test=False, on_success=on_email_success)
 
     def calculate_stats(self, period_filter=None):
         stats = {}
@@ -1407,6 +1469,80 @@ class POSSystem:
                 continue
 
         return stats, in_count, out_count, corrections_in_period
+
+    def generate_catchup_digest(self, start_time, end_time):
+        """
+        Generates a digest of 3 summaries equally distributed between start_time and end_time.
+        Returns the path to the merged PDF or None on failure.
+        """
+        try:
+            total_duration = end_time - start_time
+            if total_duration.total_seconds() <= 0:
+                return None
+
+            interval = total_duration / 3
+            temp_pdfs = []
+            now_str = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+
+            # Generate 3 parts
+            for i in range(3):
+                part_start = start_time + (interval * i)
+                part_end = start_time + (interval * (i + 1))
+
+                # Get stats for this part
+                data, in_c, out_c, corr_list, ret_breakdown = self.gen_view(override_period=(part_start, part_end))
+
+                # Temp filename
+                fname = f"temp_digest_{now_str}_part{i+1}.pdf"
+                fpath = os.path.join(SUMMARY_FOLDER, fname)
+
+                # Generate PDF (using same logic as gen_pdf but targeted)
+                title = f"MISSED SUMMARY PART {i+1}/3"
+                date_label = f"From {part_start.strftime('%m-%d %H:%M')} To {part_end.strftime('%m-%d %H:%M')}"
+
+                success = self.generate_grouped_pdf(
+                    fpath,
+                    title,
+                    date_label,
+                    data,
+                    ["Product", "Source", "Price", "Added", "Sold", "Stock", "Damaged", "Sales"],
+                    [1.0, 3.0, 4.1, 4.7, 5.2, 5.7, 6.2, 6.9],
+                    is_summary=True,
+                    extra_info=f"Digest Part {i+1} | In: {in_c} | Out: {out_c}",
+                    subtotal_indices=[3, 4, 6, 7],
+                    correction_list=corr_list,
+                    returns_breakdown=ret_breakdown
+                )
+
+                if success:
+                    temp_pdfs.append(fpath)
+
+            if not temp_pdfs:
+                return None
+
+            # Merge PDFs
+            merged_fname = f"Digest_Unsent_{now_str}.pdf"
+            merged_path = os.path.join(SUMMARY_FOLDER, merged_fname)
+
+            merger = PdfWriter()
+            for pdf_path in temp_pdfs:
+                merger.append(pdf_path)
+
+            merger.write(merged_path)
+            merger.close()
+
+            # Cleanup temp files
+            for pdf_path in temp_pdfs:
+                try:
+                    os.remove(pdf_path)
+                except:
+                    pass
+
+            return merged_path
+
+        except Exception as e:
+            print(f"Error generating digest: {e}")
+            return None
 
     def generate_grouped_pdf(self, filepath, title, date_str, items, col_headers, col_pos, is_summary=False,
                              extra_info="", subtotal_indices=None, is_inventory=False, correction_list=None, returns_breakdown=None):
@@ -3035,7 +3171,7 @@ def launch_app():
     splash = SplashScreen(root, cfg.get("splash_img", ""), cfg.get("cached_business_name", ""), APP_TITLE)
 
     def loader():
-        global pd, canvas, letter, inch, PdfReader, ntplib
+        global pd, canvas, letter, inch, PdfReader, PdfWriter, ntplib
         global Flask, request, jsonify, render_template_string, qrcode
         global smtplib, ssl, MIMEText, MIMEMultipart, MIMEBase, encoders
 
@@ -3047,7 +3183,7 @@ def launch_app():
             from reportlab.lib.pagesizes import letter;
             from reportlab.lib.units import inch
             splash.update_status("Loading Utils...")
-            from pypdf import PdfReader;
+            from pypdf import PdfReader, PdfWriter;
             import ntplib
 
             splash.update_status("Loading Web Server...")
