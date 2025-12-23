@@ -19,17 +19,106 @@ from style_manager import StyleManager
 # pyinstaller --onefile --noconsole --splash splash_image.png main.py
 
 # --- CONFIGURATION ---
+# AppData Path Setup
+try:
+    APP_DATA_DIR = os.path.join(os.environ['APPDATA'], "MMD_POS_System")
+except KeyError:
+    # Fallback for non-standard environments (e.g. Linux/Mac if running there, though prompt implies Windows)
+    APP_DATA_DIR = os.path.join(os.path.expanduser("~"), ".mmd_pos_system")
+
+if not os.path.exists(APP_DATA_DIR):
+    os.makedirs(APP_DATA_DIR)
+
 RECEIPT_FOLDER = "receipts"
 INVENTORY_FOLDER = "inventoryreceipts"
 SUMMARY_FOLDER = "summaryreceipts"
 CORRECTION_FOLDER = "correctionreceipts"
 DAMAGED_FOLDER = "damagereceipts"
 DATA_FILE = "products.xlsx"
-CONFIG_FILE = "config.json"
-LEDGER_FILE = "ledger.json"
+CONFIG_FILE = os.path.join(APP_DATA_DIR, "config.json")
+LEDGER_FILE = os.path.join(APP_DATA_DIR, "ledger.json")
 APP_TITLE = "MMD Internal POS v1.0MD"
 
 SOURCES = ["Remaining", "Delivery Receipt", "Transfers", "O_Beverages"]
+
+
+# --- HELPER FUNCTIONS (IO & MIGRATION) ---
+def migrate_legacy_files():
+    """Moves ledger.json and config.json from CWD to AppData if they exist locally."""
+    cwd_config = "config.json"
+    cwd_ledger = "ledger.json"
+
+    # Migrate Config
+    if os.path.exists(cwd_config):
+        try:
+            # If target exists, we overwrite or skip?
+            # Standard migration usually implies moving the active state.
+            # We will overwrite target with local legacy file to preserve state.
+            shutil.move(cwd_config, CONFIG_FILE)
+            print(f"Migrated {cwd_config} to {CONFIG_FILE}")
+        except Exception as e:
+            print(f"Migration error for config: {e}")
+
+    # Migrate Ledger
+    if os.path.exists(cwd_ledger):
+        try:
+            shutil.move(cwd_ledger, LEDGER_FILE)
+            print(f"Migrated {cwd_ledger} to {LEDGER_FILE}")
+        except Exception as e:
+            print(f"Migration error for ledger: {e}")
+
+def atomic_write_json(filepath, data):
+    """Writes JSON data to a file atomically using flush, fsync, and rename."""
+    tmp_path = filepath + ".tmp"
+    try:
+        with open(tmp_path, 'w') as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, filepath)
+    except Exception as e:
+        print(f"Atomic write failed for {filepath}: {e}")
+        raise
+
+def perform_rolling_backup():
+    """Backs up ledger.json to AppData/backups and keeps only the latest 10."""
+    if not os.path.exists(LEDGER_FILE):
+        return
+
+    backup_dir = os.path.join(APP_DATA_DIR, "backups")
+    if not os.path.exists(backup_dir):
+        os.makedirs(backup_dir)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_filename = f"ledger_backup_{timestamp}.json"
+    backup_path = os.path.join(backup_dir, backup_filename)
+
+    try:
+        shutil.copy2(LEDGER_FILE, backup_path)
+        print(f"Backup created: {backup_path}")
+    except Exception as e:
+        print(f"Backup failed: {e}")
+        return
+
+    # Cleanup old backups
+    try:
+        backups = [
+            os.path.join(backup_dir, f)
+            for f in os.listdir(backup_dir)
+            if f.startswith("ledger_backup_") and f.endswith(".json")
+        ]
+        # Sort by modification time (oldest first)
+        backups.sort(key=os.path.getmtime)
+
+        while len(backups) > 10:
+            oldest = backups.pop(0)
+            try:
+                os.remove(oldest)
+                print(f"Deleted old backup: {oldest}")
+            except OSError:
+                pass
+    except Exception as e:
+        print(f"Backup cleanup error: {e}")
 
 # --- EMAIL SENDER CONFIGURATION ---
 SMTP_SERVER = "smtp.gmail.com"
@@ -789,8 +878,7 @@ class POSSystem:
     def save_ledger(self):
         try:
             data = {"transactions": self.ledger, "summary_count": self.summary_count, "shortcuts_asked": self.shortcuts_asked}
-            with open(LEDGER_FILE, 'w') as f:
-                json.dump(data, f, indent=2)
+            atomic_write_json(LEDGER_FILE, data)
         except Exception as e:
             messagebox.showerror("Save Error", f"Could not save database: {e}")
 
@@ -3158,6 +3246,9 @@ def launch_app():
     except ImportError:
         pass
 
+    # 1. Migrate Legacy Files (Run before config load)
+    migrate_legacy_files()
+
     root = tk.Tk()
     root.withdraw()
     cfg = {"splash_img": "", "cached_business_name": "MMD POS System"}
@@ -3171,6 +3262,9 @@ def launch_app():
     splash = SplashScreen(root, cfg.get("splash_img", ""), cfg.get("cached_business_name", ""), APP_TITLE)
 
     def loader():
+        # 2. Perform Backup
+        perform_rolling_backup()
+
         global pd, canvas, letter, inch, PdfReader, PdfWriter, ntplib
         global Flask, request, jsonify, render_template_string, qrcode
         global smtplib, ssl, MIMEText, MIMEMultipart, MIMEBase, encoders
