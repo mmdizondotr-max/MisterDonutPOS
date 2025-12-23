@@ -37,7 +37,7 @@ DAMAGED_FOLDER = "damagereceipts"
 DATA_FILE = "products.xlsx"
 CONFIG_FILE = os.path.join(APP_DATA_DIR, "config.json")
 LEDGER_FILE = os.path.join(APP_DATA_DIR, "ledger.json")
-APP_TITLE = "MMD Inventory Tracker v1.0MD"
+APP_TITLE = "MMD Inventory Tracker (Mister Donut) v1.0"
 
 SOURCES = ["Remaining", "Delivery Receipt", "Transfers", "O_Beverages"]
 
