@@ -4,27 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="3945c9d3-5027-412a-8a1e-f5b8a4b8ed70" name="Changes" comment="HP Commit">
-      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_05-Dec-25_12_18_PM_[Changes]/PYZ-00.pyz" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_05-Dec-25_12_18_PM_[Changes]/base_library.zip" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_05-Dec-25_12_18_PM_[Changes]/main.exe" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_05-Dec-25_12_18_PM_[Changes]/main.pkg" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_05-Dec-25_12_18_PM_[Changes]/shelved.patch" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_05-Dec-25_12_18_PM__Changes_.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_12_5_2025_11_23_AM_[Changes]/shelved.patch" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_12_5_2025_11_23_AM__Changes_.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/main/Analysis-00.toc" beforeDir="false" afterPath="$PROJECT_DIR$/build/main/Analysis-00.toc" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/main/EXE-00.toc" beforeDir="false" afterPath="$PROJECT_DIR$/build/main/EXE-00.toc" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/main/PKG-00.toc" beforeDir="false" afterPath="$PROJECT_DIR$/build/main/PKG-00.toc" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/main/Splash-00.res" beforeDir="false" afterPath="$PROJECT_DIR$/build/main/Splash-00.res" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/main/Splash-00.toc" beforeDir="false" afterPath="$PROJECT_DIR$/build/main/Splash-00.toc" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/main/base_library.zip" beforeDir="false" afterPath="$PROJECT_DIR$/build/main/base_library.zip" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/main/main.pkg" beforeDir="false" afterPath="$PROJECT_DIR$/build/main/main.pkg" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/main/warn-main.txt" beforeDir="false" afterPath="$PROJECT_DIR$/build/main/warn-main.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/main/xref-main.html" beforeDir="false" afterPath="$PROJECT_DIR$/build/main/xref-main.html" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dist/main.exe" beforeDir="false" afterPath="$PROJECT_DIR$/dist/main.exe" afterDir="false" />
-    </list>
+    <list default="true" id="3945c9d3-5027-412a-8a1e-f5b8a4b8ed70" name="Changes" comment="HP Commit" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -63,24 +43,24 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.main.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "git-widget-placeholder": "master",
-    "ignore.virus.scanning.warn.message": "true",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.tslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "npm",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.main.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
@@ -101,6 +81,7 @@
       <workItem from="1764916211393" duration="341000" />
       <workItem from="1764977113777" duration="3615000" />
       <workItem from="1766494001694" duration="479000" />
+      <workItem from="1766494551464" duration="57000" />
     </task>
     <task id="LOCAL-00001" summary="Initial Commit">
       <option name="closed" value="true" />
@@ -166,7 +147,15 @@
       <option name="project" value="LOCAL" />
       <updated>1764916395150</updated>
     </task>
-    <option name="localTasksCounter" value="9" />
+    <task id="LOCAL-00009" summary="HP Commit">
+      <option name="closed" value="true" />
+      <created>1766494594815</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1766494594815</updated>
+    </task>
+    <option name="localTasksCounter" value="10" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

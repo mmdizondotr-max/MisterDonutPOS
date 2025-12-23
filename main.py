@@ -16,7 +16,7 @@ from style_manager import StyleManager
 
 #Terminal Commands when newly cloned to PyCharm
 # pip install pandas openpyxl reportlab pypdf ntplib Pillow pyinstaller flask qrcode
-# pyinstaller --onefile --noconsole --splash splash_image.png main.py
+# pyinstaller --onefile --noconsole --splash splash_image2.png main.py
 
 # --- CONFIGURATION ---
 # AppData Path Setup
