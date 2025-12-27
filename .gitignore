@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / Build
+build/
+dist/
+*.spec
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# Virtual Env
+venv/
+.venv/
+env/
+
+# Logs
+*.log
+
+# Project Data & Config
+products.xlsx
+ledger.json
+config.json
+*.tmp
+
+# Generated Receipts Folders
+receipts/
+inventoryreceipts/
+summaryreceipts/
+correctionreceipts/
+damagereceipts/
+
+# Backups
+backups/

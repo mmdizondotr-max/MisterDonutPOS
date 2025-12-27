@@ -1,0 +1,9 @@
+pandas
+openpyxl
+reportlab
+pypdf
+ntplib
+Pillow
+flask
+qrcode
+pyinstaller
