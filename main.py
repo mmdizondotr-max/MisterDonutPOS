@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import font
+import tkinter.font as font
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import os
 import datetime
