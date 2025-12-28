@@ -196,6 +196,13 @@ def cleanup_products_file(pd_module):
             df = df.reset_index(drop=True)
             df.at[0, 'Business Name'] = business_name
 
+        # 6. Cleanup Columns
+        allowed_cols = ["Business Name", "Product Category", "Product Name", "Price",
+                        "Src_DeliveryReceipt", "Src_O_Beverages", "DR Price", "Servings_Per_Unit"]
+        # Filter existing columns that are in allowed list
+        cols_to_keep = [c for c in allowed_cols if c in df.columns]
+        df = df[cols_to_keep]
+
         # Save back
         df.to_excel(DATA_FILE, index=False)
         print("Products file cleanup successful.")
@@ -3037,6 +3044,12 @@ class POSSystem:
             # Process Returns (Damaged Out)
             for line in p_data.get('returns_lines', []):
                 key = ('Remaining', curr_price) # Default
+                # Find the best match key if possible (Source/Price)?
+                # Returns don't usually track original source perfectly, so defaulting to Remaining/CurrentPrice is standard.
+                # However, to balance equation per line, we ideally subtract from the right place.
+                # But since we subtract from 'Added' which is aggregated by Source/Price,
+                # we must attribute returns to a Source/Price bucket.
+                # Defaulting to Remaining/CurrentPrice matches the typical Stock In bucket.
 
                 if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
                 act_map[key]['returns'] += line['qty']
@@ -3065,6 +3078,16 @@ class POSSystem:
                 for p in sorted(prices, reverse=True):
                     d = act_map.get((src, p), {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0})
 
+                    # HIDE NEGATIVE ADDED LINES FOR DELIVERY RECEIPT (Rollovers)
+                    # Requirement: "no need to show negative added numbers from DR"
+                    if src == "Delivery Receipt" and d['in'] < 0:
+                        continue
+
+                    # ADJUST ADDED: Added = In - Returns
+                    # Requirement: (Added - Sold) should be equal to (Stock + Damaged)
+                    # Subtracting returns from Added balances this equation.
+                    adjusted_in = d.get('in', 0) - d.get('returns', 0)
+
                     show_rem = 0
                     show_dmg = 0
                     if p == curr_price:
@@ -3072,7 +3095,7 @@ class POSSystem:
                         show_dmg = cur_dmg
 
                     # Filter: hide if empty line (no activity and no stock shown)
-                    if d['in'] == 0 and d['out'] == 0 and show_rem == 0 and show_dmg == 0 and d['returns'] == 0:
+                    if adjusted_in == 0 and d['out'] == 0 and show_rem == 0 and show_dmg == 0 and d['returns'] == 0:
                         continue
 
                     rows.append({
@@ -3081,7 +3104,7 @@ class POSSystem:
                         'name': name,
                         'source': src,
                         'price': p,
-                        'in': d['in'],
+                        'in': adjusted_in, # Use adjusted IN
                         'out': d['out'],
                         'remaining': show_rem,
                         'damaged': show_dmg,
