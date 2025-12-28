@@ -196,6 +196,18 @@ def cleanup_products_file(pd_module):
             df = df.reset_index(drop=True)
             df.at[0, 'Business Name'] = business_name
 
+        # 6. Column Cleanup (Enforce specific columns only)
+        # Rename legacy 'Src_Beverages' to 'Src_O_Beverages' if needed
+        if 'Src_Beverages' in df.columns and 'Src_O_Beverages' not in df.columns:
+            df.rename(columns={'Src_Beverages': 'Src_O_Beverages'}, inplace=True)
+
+        allowed_cols = ["Business Name", "Product Category", "Product Name", "Price",
+                        "Src_DeliveryReceipt", "Src_O_Beverages", "DR Price", "Servings_Per_Unit"]
+
+        # Keep only allowed columns that exist in the dataframe
+        cols_to_keep = [c for c in allowed_cols if c in df.columns]
+        df = df[cols_to_keep]
+
         # Save back
         df.to_excel(DATA_FILE, index=False)
         print("Products file cleanup successful.")
@@ -3073,6 +3085,10 @@ class POSSystem:
 
                     # Filter: hide if empty line (no activity and no stock shown)
                     if d['in'] == 0 and d['out'] == 0 and show_rem == 0 and show_dmg == 0 and d['returns'] == 0:
+                        continue
+
+                    # Filter: hide negative Added quantities for Delivery Receipt (Rollover artifact)
+                    if src == "Delivery Receipt" and d['in'] < 0:
                         continue
 
                     rows.append({
