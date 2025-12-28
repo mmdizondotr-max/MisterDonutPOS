@@ -928,12 +928,12 @@ class POSSystem:
 
     def load_products(self):
         req_cols = ["Business Name", "Product Category", "Product Name", "Price",
-                    "Src_DeliveryReceipt", "Src_O_Beverages", "DR Price"]
+                    "Src_DeliveryReceipt", "Src_O_Beverages", "DR Price", "Servings_Per_Unit"]
 
         if not os.path.exists(DATA_FILE):
             # Create template with new columns if not exists
             df = pd.DataFrame(columns=req_cols)
-            df.loc[0] = ["My Business", "General", "Sample Product", 100.00, 1, 0, 0.0]
+            df.loc[0] = ["My Business", "General", "Sample Product", 100.00, 1, 0, 0.0, 1]
             try:
                 df.to_excel(DATA_FILE, index=False)
             except:
@@ -946,6 +946,19 @@ class POSSystem:
         except Exception as e:
             messagebox.showerror("Load Error", f"Error reading Excel: {e}")
             return
+
+        # --- Schema Update Check ---
+        cols_added = False
+        if "Servings_Per_Unit" not in raw_df.columns:
+            raw_df["Servings_Per_Unit"] = 1
+            cols_added = True
+
+        if cols_added:
+            try:
+                raw_df.to_excel(DATA_FILE, index=False)
+                print("Updated products.xlsx schema with new columns.")
+            except Exception as e:
+                print(f"Failed to update schema: {e}")
 
         if "Business Name" in raw_df.columns and not raw_df.empty:
             val = str(raw_df.iloc[0]["Business Name"]).strip()
@@ -1018,12 +1031,20 @@ class POSSystem:
                 dr_price = float(row.get('DR Price', 0.0))
                 if pd.isna(dr_price): dr_price = 0.0
 
+                servings_unit = row.get('Servings_Per_Unit', 1)
+                try:
+                    servings_unit = int(servings_unit)
+                    if servings_unit < 1: servings_unit = 1
+                except:
+                    servings_unit = 1
+
                 prod_data = {
                     "Business Name": b_name,
                     "Product Category": cat,
                     "Product Name": name,
                     "Price": price,
-                    "DR Price": dr_price
+                    "DR Price": dr_price,
+                    "Servings_Per_Unit": servings_unit
                 }
                 prod_data.update(src_flags)
                 valid_products.append(prod_data)
@@ -1444,7 +1465,9 @@ class POSSystem:
                         stats[name]['sources'][source] += qty
 
                         if in_period:
-                            stats[name]['in_lines'].append({'price': price, 'qty': qty, 'source': source})
+                            # Pass qty_packs for Summary DR Breakdown calculation
+                            packs = item.get('qty_packs', qty)
+                            stats[name]['in_lines'].append({'price': price, 'qty': qty, 'source': source, 'packs': packs})
 
                     elif t_type == 'sales':
                         # Sales deplete sources.
@@ -2063,31 +2086,48 @@ class POSSystem:
         date_str = now.strftime('%Y-%m-%d %H:%M:%S')
         fname = f"Inventory_{now.strftime('%Y%m%d-%H%M%S')}.pdf"
         stats, _, _, _ = self.calculate_stats(None)
-        p_items = []
-        for i in self.inventory_cart:
-            # Need to get current stock per source?
-            # Or just total stock? Receipt usually shows total new stock.
-            hist = stats.get(i['name'], {'in': 0, 'out': 0})
-            new_stock = (hist['in'] + i['qty']) - hist['out']
-            x = i.copy();
-            x['new_stock'] = new_stock;
-            p_items.append(x)
-
-        # Update PDF columns to include Source
-        # Requirement 4: Inventory PDF Receipts should just have a column for "Source" after Qty. Added.
-        # Instead of modifying category.
 
         pdf_items = []
-        for item in p_items:
-            c = item.copy()
-            # No longer hacking category.
-            # c['category'] = f"{item.get('source', 'General')} - {item.get('category', 'General')}"
-            pdf_items.append(c)
+        ledger_items = []
+
+        for i in self.inventory_cart:
+            # Get multiplier configuration
+            prod_row = self.products_df[self.products_df['Product Name'] == i['name']]
+            servings_unit = 1
+            if not prod_row.empty:
+                servings_unit = prod_row.iloc[0].get('Servings_Per_Unit', 1)
+
+            # Apply multiplier only if Source is Delivery Receipt
+            multiplier = 1
+            if i['source'] == "Delivery Receipt":
+                multiplier = servings_unit
+
+            qty_packs = i['qty'] # This is the input value (packs)
+            qty_servings = qty_packs * multiplier
+
+            # Calculate new stock (in Servings)
+            hist = stats.get(i['name'], {'in': 0, 'out': 0})
+            current_servings = hist['in'] - hist['out']
+            new_stock_servings = current_servings + qty_servings
+
+            # Prepare Item for PDF (Shows Packs in Qty Added, Servings in New Stock)
+            pdf_item = i.copy()
+            pdf_item['qty'] = qty_packs # Explicitly ensure Qty Added is Packs
+            pdf_item['new_stock'] = new_stock_servings
+            pdf_items.append(pdf_item)
+
+            # Prepare Item for Ledger (Stores Servings as main Qty for stats, Packs for reference)
+            l_item = i.copy()
+            l_item['qty'] = qty_servings # Main Qty is Servings for calculate_stats
+            l_item['qty_packs'] = qty_packs
+            l_item['pack_multiplier'] = multiplier
+            ledger_items.append(l_item)
 
         if self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT",
                                      date_str, pdf_items, ["Item", "Price", "Qty Added", "Source", "New Stock"],
                                      [1.0, 3.2, 4.0, 5.0, 6.5], subtotal_indices=[2], is_inventory=True):
-            transaction = {"type": "inventory", "timestamp": date_str, "filename": fname, "items": self.inventory_cart}
+
+            transaction = {"type": "inventory", "timestamp": date_str, "filename": fname, "items": ledger_items}
             self.ledger.append(transaction);
             self.save_ledger()
             self.clear_inv();
@@ -2885,7 +2925,9 @@ class POSSystem:
                 act_map[key]['in'] += line['qty']
                 # DR Total is now calculated on STOCK IN for Delivery Receipt
                 if line['source'] == "Delivery Receipt":
-                    act_map[key]['dr_total'] += dr_price * line['qty']
+                    # Use packs count for cost calculation if available
+                    count_for_cost = line.get('packs', line['qty'])
+                    act_map[key]['dr_total'] += dr_price * count_for_cost
 
             # Process Sales (OUT)
             for line in p_data['sales_lines']:
@@ -3217,8 +3259,29 @@ class POSSystem:
                 date_str = entry.get('timestamp');
                 items = entry.get('items', [])
                 if entry['type'] == "inventory":
+                    # Prepare items for PDF: Use qty_packs if available for "Qty Added"
+                    pdf_items = []
+                    for it in items:
+                        pit = it.copy()
+                        if 'qty_packs' in it:
+                            pit['qty'] = it['qty_packs']
+                        # Re-calculate New Stock if not stored?
+                        # Ideally, reprint uses stored snapshot if available, but ledger items don't store "new_stock" usually.
+                        # Wait, generate_grouped_pdf expects 'new_stock' key for Inventory?
+                        # commit_inv passes "new_stock". ledger items don't have it.
+                        # If we reprint, we might lose "New Stock" context unless we replay everything.
+                        # But `restore_data_json` is usually for massive restore.
+                        # The existing code passed `items` directly.
+                        # `commit_inv` adds `new_stock` to `p_items` (passed to gen_pdf) but NOT to `transaction` items.
+                        # So existing code's reprints likely had "New Stock" column empty or 0?
+                        # `generate_grouped_pdf` uses `item.get('new_stock', 0)`.
+                        # So yes, historical reprints were missing New Stock data.
+                        # We can't easily fix that without full replay.
+                        # We will just ensure "Qty Added" is correct (Packs).
+                        pdf_items.append(pit)
+
                     self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT", date_str,
-                                              items, ["Item", "Price", "Qty Added", "New Stock"], [1.0, 3.2, 4.0, 5.0, 6.5],
+                                              pdf_items, ["Item", "Price", "Qty Added", "New Stock"], [1.0, 3.2, 4.0, 5.0, 6.5],
                                               subtotal_indices=[2], is_inventory=True)
                 elif entry['type'] == "sales":
                     self.generate_grouped_pdf(os.path.join(RECEIPT_FOLDER, fname), "SALES RECEIPT", date_str, items,
