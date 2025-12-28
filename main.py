@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import font
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import os
 import datetime
@@ -1367,9 +1368,29 @@ class POSSystem:
 
     def get_dropdown_values(self):
         if not self.products_df.empty:
-            sorted_df = self.products_df.sort_values(by=["Product Category", "Product Name"])
+            # Sorted alphabetically by name regardless of category
+            sorted_df = self.products_df.sort_values(by=["Product Name"])
             return sorted_df.apply(lambda x: f"{x['Product Name']} ({x['Price']:.2f})", axis=1).tolist()
         return []
+
+    def autofit_treeview(self, tree):
+        try:
+            f = font.Font()
+        except:
+            return # specific font not found or issue
+
+        for col in tree['columns']:
+            heading = tree.heading(col, 'text')
+            max_width = f.measure(str(heading)) + 25
+
+            for item in tree.get_children():
+                cell_val = tree.set(item, col)
+                w = f.measure(str(cell_val)) + 25
+                if w > max_width:
+                    max_width = w
+
+            if max_width > 500: max_width = 500
+            tree.column(col, width=max_width)
 
     def get_product_details(self, selection_string):
         code, name, price, cat, _ = self.get_product_details_extended(selection_string)
@@ -2125,14 +2146,15 @@ class POSSystem:
         scrollbar = ttk.Scrollbar(tree_frame)
         scrollbar.pack(side="right", fill="y")
 
-        self.inv_tree = ttk.Treeview(tree_frame, columns=("cat", "name", "price", "qty", "source"), show="headings",
+        self.inv_tree = ttk.Treeview(tree_frame, columns=("cat", "name", "dr_price", "serv_per_qty", "qty", "source"), show="headings",
                                      yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.inv_tree.yview)
 
         self.inv_tree.heading("cat", text="Category")
         self.inv_tree.heading("name", text="Product")
-        self.inv_tree.heading("price", text="Price")
-        self.inv_tree.heading("qty", text="Qty")
+        self.inv_tree.heading("dr_price", text="DR Price")
+        self.inv_tree.heading("serv_per_qty", text="Servings per Qty")
+        self.inv_tree.heading("qty", text="In (Packs)")
         self.inv_tree.heading("source", text="Source")
         self.inv_tree.pack(fill="both", expand=True)
 
@@ -2192,7 +2214,20 @@ class POSSystem:
     def refresh_inv(self):
         for i in self.inv_tree.get_children(): self.inv_tree.delete(i)
         for i in sorted(self.inventory_cart, key=lambda x: (x['category'], x['name'])):
-            self.inv_tree.insert("", "end", values=(i['category'], i['name'], f"{i['price']:.2f}", i['qty'], i['source']))
+            # Lookup extra details
+            dr_price = 0.0
+            servings = 1
+            if not self.products_df.empty:
+                row = self.products_df[self.products_df['Product Name'] == i['name']]
+                if not row.empty:
+                    try:
+                        dr_price = float(row.iloc[0].get('DR Price', 0.0))
+                        servings = int(row.iloc[0].get('Servings_Per_Unit', 1))
+                    except:
+                        pass
+
+            self.inv_tree.insert("", "end", values=(i['category'], i['name'], f"{dr_price:.2f}", servings, i['qty'], i['source']))
+        self.autofit_treeview(self.inv_tree)
 
     def del_inv_line(self):
         if not self.inv_tree.selection(): return
@@ -2218,11 +2253,13 @@ class POSSystem:
             # Get multiplier configuration
             prod_row = self.products_df[self.products_df['Product Name'] == i['name']]
             servings_unit = 1
+            dr_price = 0.0
             if not prod_row.empty:
                 try:
                     # Explicitly cast to int to avoid numpy.int64 JSON serialization issues
                     val = prod_row.iloc[0].get('Servings_Per_Unit', 1)
                     servings_unit = int(val)
+                    dr_price = float(prod_row.iloc[0].get('DR Price', 0.0))
                 except (ValueError, TypeError):
                     servings_unit = 1
 
@@ -2243,6 +2280,8 @@ class POSSystem:
             pdf_item = i.copy()
             pdf_item['qty'] = qty_packs # Explicitly ensure Qty Added is Packs
             pdf_item['new_stock'] = new_stock_servings
+            pdf_item['dr_price'] = dr_price
+            pdf_item['serv_per_qty'] = servings_unit
             pdf_items.append(pdf_item)
 
             # Prepare Item for Ledger (Stores Servings as main Qty for stats, Packs for reference)
@@ -2253,8 +2292,8 @@ class POSSystem:
             ledger_items.append(l_item)
 
         if self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT",
-                                     date_str, pdf_items, ["Item", "Price", "Qty Added", "Source", "New Stock"],
-                                     [1.0, 3.2, 4.0, 5.0, 6.5], subtotal_indices=[2], is_inventory=True):
+                                     date_str, pdf_items, ["Item", "DR Price", "Servings per Qty", "In (Packs)", "Source", "New Stock"],
+                                     [1.0, 3.2, 4.0, 5.0, 5.8, 6.8], subtotal_indices=[3], is_inventory=True):
 
             transaction = {"type": "inventory", "timestamp": date_str, "filename": fname, "items": ledger_items}
             self.ledger.append(transaction);
@@ -2303,11 +2342,11 @@ class POSSystem:
                                      show="headings", yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.pos_tree.yview)
 
-        self.pos_tree.heading("cat", text="Cat");
+        self.pos_tree.heading("cat", text="Category");
         self.pos_tree.heading("name", text="Product")
         self.pos_tree.heading("price", text="Price");
         self.pos_tree.heading("qty", text="Qty");
-        self.pos_tree.heading("sub", text="Sub")
+        self.pos_tree.heading("sub", text="Subtotal")
         self.pos_tree.column("cat", width=80);
         self.pos_tree.column("price", width=60)
         self.pos_tree.column("qty", width=40);
@@ -2428,6 +2467,7 @@ class POSSystem:
                                                     f"{i['subtotal']:.2f}"))
             tot += i['subtotal']
         self.lbl_pos_total.config(text=f"Total: {tot:.2f}")
+        self.autofit_treeview(self.pos_tree)
 
     def del_pos_line(self):
         if not self.pos_tree.selection(): return
@@ -2651,6 +2691,7 @@ class POSSystem:
         for name, data in stats.items():
             if data['damaged'] > 0:
                 self.flush_tree.insert("", "end", values=(name, int(data['damaged'])))
+        self.autofit_treeview(self.flush_tree)
 
     def on_ta_prod_sel(self, event):
         sel = self.ta_prod_var.get()
@@ -2729,6 +2770,7 @@ class POSSystem:
         for i in self.ta_tree.get_children(): self.ta_tree.delete(i)
         for i in self.ta_cart:
             self.ta_tree.insert("", "end", values=(i['name'], i['qty'], i['source']))
+        self.autofit_treeview(self.ta_tree)
 
     def add_to_returns_cart(self):
         sel, qty = self.ret_prod_var.get(), self.ret_qty_var.get()
@@ -2754,6 +2796,7 @@ class POSSystem:
         for i in self.ret_tree.get_children(): self.ret_tree.delete(i)
         for i in self.ret_cart:
             self.ret_tree.insert("", "end", values=(i['name'], i['qty']))
+        self.autofit_treeview(self.ret_tree)
 
         self.on_ret_prod_sel(None)
 
@@ -2896,6 +2939,7 @@ class POSSystem:
                     time_part = ts.split(' ')[1] if ' ' in ts else ts
                     self.corr_list_tree.insert("", "end", values=(time_part, trans.get('filename')),
                                                tags=(json.dumps(trans),))
+        self.autofit_treeview(self.corr_list_tree)
 
     def load_receipt_for_correction(self):
         sel = self.corr_list_tree.selection()
@@ -2911,6 +2955,7 @@ class POSSystem:
             c_item['adjustment'] = 0
             self.correction_cart.append(c_item)
             self.corr_edit_tree.insert("", "end", values=(item['name'], item['qty'], 0))
+        self.autofit_treeview(self.corr_edit_tree)
 
     def ask_correction_val(self, event):
         if not self.selected_transaction: return
@@ -3015,13 +3060,14 @@ class POSSystem:
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
         scrollbar = ttk.Scrollbar(tree_frame);
         scrollbar.pack(side="right", fill="y")
-        self.sum_tree = ttk.Treeview(tree_frame, columns=("cat", "name", "price", "in", "source", "out", "rem", "damaged", "dr_total", "returns", "sale"),
+        self.sum_tree = ttk.Treeview(tree_frame, columns=("cat", "name", "price", "in", "in_packs", "source", "out", "rem", "damaged", "dr_total", "returns", "sale"),
                                      show="headings", yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.sum_tree.yview)
         self.sum_tree.heading("cat", text="Cat");
         self.sum_tree.heading("name", text="Product")
         self.sum_tree.heading("price", text="Price");
-        self.sum_tree.heading("in", text="In");
+        self.sum_tree.heading("in", text="In (Srv)");
+        self.sum_tree.heading("in_packs", text="In (Packs)");
         self.sum_tree.heading("source", text="Source");
         self.sum_tree.heading("out", text="Out");
         self.sum_tree.heading("rem", text="Stk");
@@ -3029,7 +3075,7 @@ class POSSystem:
         self.sum_tree.heading("dr_total", text="DR Tot");
         self.sum_tree.heading("returns", text="Returns");
         self.sum_tree.heading("sale", text="Sales")
-        for col in ["in", "out", "rem", "damaged", "price", "dr_total", "returns"]: self.sum_tree.column(col, width=50)
+        for col in ["in", "in_packs", "out", "rem", "damaged", "price", "dr_total", "returns"]: self.sum_tree.column(col, width=50)
         self.sum_tree.column("source", width=80)
         self.sum_tree.pack(fill="both", expand=True)
         self.lbl_sum_info = ttk.Label(self.tab_summary, text="Ready")
@@ -3217,6 +3263,7 @@ class POSSystem:
                 s['name'],
                 f"{s['price']:.2f}",
                 int(s['in']),
+                int(s.get('packs_in', 0)),
                 s['source'],
                 int(s['out']),
                 int(s['remaining']),
@@ -3235,6 +3282,7 @@ class POSSystem:
             if s and e:
                 p_txt = f"{s.strftime('%m-%d')} to {e.strftime('%m-%d')}"
 
+        self.autofit_treeview(self.sum_tree)
         self.lbl_sum_info.config(text=f"Period: {p_txt} | Sales: {tot:.2f} | DR Total: {dr_grand_total:.2f}")
         return data, tot, p_txt, in_c, out_c, corr_list, returns_breakdown
 
@@ -3247,19 +3295,14 @@ class POSSystem:
         fname = f"{prefix}-{now.strftime('%Y%m%d-%H%M%S')}.pdf"
         full_path = os.path.join(SUMMARY_FOLDER, fname)
 
-        # Summary Headers: Product, Source, Price, Added, Sold, Stock, Damaged, Sales
-        # Indices:         0        1       2      3      4     5      6        7
-        # Updated spacing to prevent overlap (Damaged vs Sales)
-        # Previous: [1.0, 3.0, 4.2, 4.8, 5.3, 5.8, 6.3, 6.8]
-        # Damaged at 6.3, Sales at 6.8 (0.5 diff)
-        # New Plan: Move Sales to 7.0, Damaged to 6.3 (0.7 diff), or shift more
-        # Let's try: [1.0, 3.0, 4.1, 4.7, 5.2, 5.7, 6.2, 6.9]
+        # Summary Headers: Product, Source, Price, Added, In(Pks), Sold, Stock, Damaged, Sales
+        # Indices:         0        1       2      3      4        5     6      7        8
         success = self.generate_grouped_pdf(full_path, "INVENTORY & SALES SUMMARY",
                                             now.strftime('%Y-%m-%d %H:%M:%S'), data,
-                                            ["Product", "Source", "Price", "Added", "Sold", "Stock", "Damaged", "Sales"],
-                                            [1.0, 3.0, 4.1, 4.7, 5.2, 5.7, 6.2, 6.9], is_summary=True,
+                                            ["Product", "Source", "Price", "Added", "In(Pks)", "Sold", "Stock", "Damaged", "Sales"],
+                                            [1.0, 3.0, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0], is_summary=True,
                                             extra_info=f"Period: {p_txt} | In: {in_c} | Out: {out_c}",
-                                            subtotal_indices=[3, 4, 6, 7], correction_list=corr_list, returns_breakdown=returns_breakdown)
+                                            subtotal_indices=[3, 4, 5, 6, 8], correction_list=corr_list, returns_breakdown=returns_breakdown)
         if success:
             if not is_custom_date:
                 self.summary_count += 1
