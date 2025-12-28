@@ -928,12 +928,12 @@ class POSSystem:
 
     def load_products(self):
         req_cols = ["Business Name", "Product Category", "Product Name", "Price",
-                    "Src_DeliveryReceipt", "Src_Remaining", "Src_Transfers", "Src_O_Beverages", "DR Price"]
+                    "Src_DeliveryReceipt", "Src_O_Beverages", "DR Price"]
 
         if not os.path.exists(DATA_FILE):
             # Create template with new columns if not exists
             df = pd.DataFrame(columns=req_cols)
-            df.loc[0] = ["My Business", "General", "Sample Product", 100.00, 1, 1, 1, 0, 0.0]
+            df.loc[0] = ["My Business", "General", "Sample Product", 100.00, 1, 0, 0.0]
             try:
                 df.to_excel(DATA_FILE, index=False)
             except:
@@ -977,17 +977,27 @@ class POSSystem:
             is_o_bev = False
             other_sources = False
 
-            for src in SOURCES:
-                # Handle old column names gracefully (Beverages -> O_Beverages)
-                col_name = f"Src_{src.replace(' ', '')}"
-                # For compatibility, if Src_O_Beverages missing, check Src_Beverages
-                if src == "O_Beverages" and col_name not in row and "Src_Beverages" in row:
-                     val = row.get("Src_Beverages", 0)
-                else:
-                     val = row.get(col_name, 0)
+            # Determine DR status first (Master for Remaining/Transfers)
+            dr_val = row.get("Src_DeliveryReceipt", 0)
+            if pd.isna(dr_val): dr_val = 0
+            is_dr_active = bool(int(dr_val)) if str(dr_val).isdigit() else bool(dr_val)
 
-                if pd.isna(val): val = 0
-                is_src_active = bool(int(val)) if str(val).isdigit() else bool(val)
+            for src in SOURCES:
+                col_name = f"Src_{src.replace(' ', '')}"
+                is_src_active = False
+
+                if src in ["Remaining", "Transfers", "Delivery Receipt"]:
+                    is_src_active = is_dr_active
+                else:
+                    # O_Beverages and others
+                    if src == "O_Beverages" and col_name not in row and "Src_Beverages" in row:
+                        val = row.get("Src_Beverages", 0)
+                    else:
+                        val = row.get(col_name, 0)
+
+                    if pd.isna(val): val = 0
+                    is_src_active = bool(int(val)) if str(val).isdigit() else bool(val)
+
                 src_flags[col_name] = is_src_active
 
                 if is_src_active:
@@ -3180,6 +3190,11 @@ class POSSystem:
             if products_master:
                 try:
                     new_df = pd.DataFrame(products_master)
+                    # Streamline: Drop Src_Remaining and Src_Transfers if they exist
+                    cols_to_drop = [c for c in ["Src_Remaining", "Src_Transfers"] if c in new_df.columns]
+                    if cols_to_drop:
+                        new_df.drop(columns=cols_to_drop, inplace=True)
+
                     new_df.to_excel(DATA_FILE, index=False)
                     self.load_products()
                     self.inv_dropdown['values'] = self.get_dropdown_values()
