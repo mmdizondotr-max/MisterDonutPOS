@@ -3617,10 +3617,12 @@ class POSSystem:
                 return s.get('Remaining', 0) + s.get('Delivery Receipt', 0) + s.get('Transfers', 0) + s.get('O_Beverages', 0)
 
             total_days = 29
+            import math
 
             for day_offset in range(total_days):
                 curr_date = start_date + datetime.timedelta(days=day_offset)
                 curr_date_str = curr_date.strftime('%Y-%m-%d')
+                daily_dr_value = 0.0
 
                 # 0. Simulate Daily Rollover (Start of Day)
                 # Move DR/Transfers to Remaining from previous day
@@ -3712,6 +3714,14 @@ class POSSystem:
 
                     qty_servings = qty_packs * multiplier
 
+                    # Calculate DR Value (using DR Price)
+                    if src == "Delivery Receipt":
+                        try:
+                            dr_p = float(p.get('DR Price', 0))
+                        except:
+                            dr_p = 0.0
+                        daily_dr_value += qty_packs * dr_p
+
                     # Add to sim stock
                     sim_stock[name][src] += qty_servings
 
@@ -3784,64 +3794,82 @@ class POSSystem:
                          t = log_sim_transaction("sales", t_time, cart_items, "Sales", RECEIPT_FOLDER)
                          sim_ledger.append(t)
 
-                # 4. Damages (Late Afternoon) - 5-10% of transaction volume? Or random items
-                if random.random() < 0.7: # 70% chance of damages happening
-                    dmg_items = []
-                    dmg_count = random.randint(1, 3)
-                    for _ in range(dmg_count):
-                         p = random.choice(products)
-                         name = p['Product Name']
-                         avail = get_total_stock(name)
-                         if avail > 0:
-                             qty_dmg = random.randint(1, max(1, int(avail // 10))) # Small amount
+                # 4. Damages (Mark unsold Remaining as Damaged) - End of Day
+                dmg_items = []
+                for name in valid_names:
+                    # Check Remaining Stock
+                    rem_qty = sim_stock[name]['Remaining']
+                    if rem_qty > 0:
+                        # Move to Damaged
+                        sim_stock[name]['Remaining'] = 0
+                        sim_stock[name]['Damaged'] += rem_qty
 
-                             # Deplete stock, move to Damaged
-                             qty_needed = qty_dmg
-                             breakdown = {}
-                             for src in ["Remaining", "Delivery Receipt", "Transfers", "O_Beverages"]:
-                                if qty_needed <= 0: break
-                                s_avail = sim_stock[name][src]
-                                if s_avail > 0:
-                                    take = min(s_avail, qty_needed)
-                                    sim_stock[name][src] -= take
-                                    breakdown[src] = take
-                                    qty_needed -= take
+                        p = next((p for p in products if p['Product Name'] == name), None)
+                        cat = p['Product Category'] if p else "General"
 
-                             sim_stock[name]['Damaged'] += qty_dmg
+                        dmg_items.append({
+                             "name": name,
+                             "qty": rem_qty,
+                             "source": "Remaining",
+                             "category": cat,
+                             "source_breakdown": {"Remaining": rem_qty}
+                        })
 
-                             for src, q in breakdown.items():
-                                 dmg_items.append({
-                                     "name": name,
-                                     "qty": q,
-                                     "source": src,
-                                     "category": p['Product Category'],
-                                     "source_breakdown": {src: q}
-                                 })
+                if dmg_items:
+                    t = log_sim_transaction("damaged_in", curr_date.replace(hour=17), dmg_items, "DamagedIn", DAMAGED_FOLDER)
+                    sim_ledger.append(t)
 
-                    if dmg_items:
-                        t = log_sim_transaction("damaged_in", curr_date.replace(hour=17), dmg_items, "DamagedIn", DAMAGED_FOLDER)
-                        sim_ledger.append(t)
+                # 5. Returns (Up to 8% of Daily DR Value)
+                target_val = daily_dr_value * 0.08
+                current_ret_val = 0.0
+                ret_items = []
 
-                # 5. Returns (Evening) - 1-2 items
-                if random.random() < 0.3:
-                    ret_items = []
-                    # Find items with damages
-                    dmg_candidates = [n for n, s in sim_stock.items() if s['Damaged'] > 0]
-                    if dmg_candidates:
-                        name = random.choice(dmg_candidates)
-                        qty_ret = 1
-                        sim_stock[name]['Damaged'] -= qty_ret
+                # Candidates: All items with damaged stock
+                dmg_candidates = [n for n, s in sim_stock.items() if s['Damaged'] > 0]
+                random.shuffle(dmg_candidates)
 
-                        p = next(p for p in products if p['Product Name'] == name)
+                for name in dmg_candidates:
+                    if current_ret_val >= target_val:
+                        break
+
+                    qty_dmg = sim_stock[name]['Damaged']
+                    p = next((p for p in products if p['Product Name'] == name), None)
+                    if not p: continue
+
+                    try:
+                        dr_price = float(p.get('DR Price', 0))
+                    except:
+                        dr_price = 0.0
+
+                    servings_per_unit = int(p.get('Servings_Per_Unit', 1))
+                    unit_cost = dr_price / servings_per_unit if servings_per_unit > 0 else 0
+
+                    qty_to_ret = 0
+                    if unit_cost > 0:
+                        needed = target_val - current_ret_val
+                        qty_needed = math.ceil(needed / unit_cost)
+                        qty_to_ret = min(qty_dmg, qty_needed)
+
+                        val_contribution = qty_to_ret * unit_cost
+                        current_ret_val += val_contribution
+                    else:
+                        # If unit cost is 0, skipping to avoid infinite loop or zero contribution
+                        # Although we could return them, they don't help reach the target value
+                        pass
+
+                    if qty_to_ret > 0:
+                        sim_stock[name]['Damaged'] -= qty_to_ret
+
                         ret_items.append({
                             "name": name,
-                            "qty": qty_ret,
+                            "qty": qty_to_ret,
                             "price": float(p['Price']),
                             "category": p['Product Category']
                         })
 
-                        t = log_sim_transaction("damaged_out", curr_date.replace(hour=18), ret_items, "Returns", DAMAGED_FOLDER)
-                        sim_ledger.append(t)
+                if ret_items:
+                    t = log_sim_transaction("damaged_out", curr_date.replace(hour=18), ret_items, "Returns", DAMAGED_FOLDER)
+                    sim_ledger.append(t)
 
             # Finalize
             self.ledger.extend(sim_ledger)
