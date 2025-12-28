@@ -120,6 +120,88 @@ def perform_rolling_backup():
     except Exception as e:
         print(f"Backup cleanup error: {e}")
 
+def cleanup_products_file(pd_module):
+    """Clean up products.xlsx on startup: Sort, Format, and Organize."""
+    if not os.path.exists(DATA_FILE):
+        return
+
+    try:
+        df = pd_module.read_excel(DATA_FILE)
+        df.columns = df.columns.str.strip()
+
+        # 1. Uppercase Category and Name
+        if 'Product Category' in df.columns:
+            df['Product Category'] = df['Product Category'].astype(str).str.upper().replace('NAN', '')
+        if 'Product Name' in df.columns:
+            df['Product Name'] = df['Product Name'].astype(str).str.upper().replace('NAN', '')
+
+        # 2. Business Name Logic (Only in A2 / Index 0)
+        business_name = ""
+        if 'Business Name' in df.columns:
+            # Find first valid string
+            valid_names = df['Business Name'].dropna().astype(str)
+            valid_names = valid_names[valid_names.str.strip() != '']
+            if not valid_names.empty:
+                business_name = valid_names.iloc[0]
+            # Clear column
+            df['Business Name'] = ""
+
+        # 3. Price Formatting (2 decimal places)
+        if 'Price' in df.columns:
+            df['Price'] = pd_module.to_numeric(df['Price'], errors='coerce').fillna(0).round(2)
+
+        # 4. DR Price Logic & Formatting
+        if 'DR Price' in df.columns and 'Src_DeliveryReceipt' in df.columns:
+            # Ensure Src is numeric for check
+            df['Src_DeliveryReceipt'] = pd_module.to_numeric(df['Src_DeliveryReceipt'], errors='coerce').fillna(0)
+
+            def fix_dr(row):
+                try:
+                    is_dr = bool(int(row['Src_DeliveryReceipt']))
+                except:
+                    is_dr = False
+
+                if not is_dr:
+                    return "-"
+                try:
+                    return round(float(row['DR Price']), 2)
+                except:
+                    return 0.00
+
+            df['DR Price'] = df.apply(fix_dr, axis=1)
+
+        # 5. Sorting (Source -> Category -> Name)
+        sort_cols = []
+        ascending = []
+        # Source Priority: Delivery Receipt, O_Beverages
+        if 'Src_DeliveryReceipt' in df.columns:
+            sort_cols.append('Src_DeliveryReceipt')
+            ascending.append(False) # 1 (True) before 0 (False)
+        if 'Src_O_Beverages' in df.columns:
+            sort_cols.append('Src_O_Beverages')
+            ascending.append(False)
+        if 'Product Category' in df.columns:
+            sort_cols.append('Product Category')
+            ascending.append(True)
+        if 'Product Name' in df.columns:
+            sort_cols.append('Product Name')
+            ascending.append(True)
+
+        if sort_cols:
+            df = df.sort_values(by=sort_cols, ascending=ascending)
+
+        # Apply Business Name to A2 (Index 0 of sorted)
+        if not df.empty and 'Business Name' in df.columns and business_name:
+            df = df.reset_index(drop=True)
+            df.at[0, 'Business Name'] = business_name
+
+        # Save back
+        df.to_excel(DATA_FILE, index=False)
+        print("Products file cleanup successful.")
+
+    except Exception as e:
+        print(f"Products cleanup failed: {e}")
+
 # --- EMAIL SENDER CONFIGURATION ---
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
@@ -1028,7 +1110,10 @@ class POSSystem:
             if is_valid:
                 seen_names.add(name)
                 b_name = str(row.get('Business Name', self.business_name))
-                dr_price = float(row.get('DR Price', 0.0))
+                try:
+                    dr_price = float(row.get('DR Price', 0.0))
+                except (ValueError, TypeError):
+                    dr_price = 0.0
                 if pd.isna(dr_price): dr_price = 0.0
 
                 servings_unit = row.get('Servings_Per_Unit', 1)
@@ -3357,6 +3442,9 @@ def launch_app():
             splash.update_status("Loading Utils...")
             from pypdf import PdfReader, PdfWriter;
             import ntplib
+
+            splash.update_status("Cleaning Product Data...")
+            cleanup_products_file(pd)
 
             splash.update_status("Loading Web Server...")
             from flask import Flask, request, jsonify, render_template_string
