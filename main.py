@@ -4,6 +4,7 @@ import os
 import datetime
 import json
 import sys
+import random
 import shutil
 import threading
 import time
@@ -3216,8 +3217,20 @@ class POSSystem:
         ttk.Button(bf, text="Backup (.json)", command=self.backup_data_json).pack(side="left", padx=5)
         ttk.Button(bf, text="Restore (.json)", command=self.restore_data_json).pack(side="left", padx=5)
 
+        # --- Developer / Testing ---
+        self.setup_testing_panel(f)
+
         # --- Web Server Settings ---
         self.setup_web_server_panel(self.tab_settings_web)
+
+    def setup_testing_panel(self, parent_frame):
+        ttk.Separator(parent_frame, orient='horizontal').pack(fill='x', pady=10)
+        ttk.Label(parent_frame, text="Developer / Testing", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tf = ttk.Frame(parent_frame)
+        tf.pack(anchor="w", pady=5)
+
+        ttk.Button(tf, text="Load Test (4 Weeks)", command=self.prompt_load_test).pack(side="left", padx=5)
+        ttk.Button(tf, text="Reset All Data", command=self.prompt_reset_data, style="Danger.TButton").pack(side="left", padx=5)
 
     def verify_and_test_email(self):
         email_input = self.entry_email.get().strip()
@@ -3399,6 +3412,423 @@ class POSSystem:
                                 f"Restored {count} records.\nSummary Counter: {self.summary_count}\n{restored_prod_msg}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed: {e}")
+
+    def prompt_reset_data(self):
+        resp = simpledialog.askstring("RESET DATA", "Type 'reset' to delete ALL data (Transactions, PDFs, Config).\nThis cannot be undone.", parent=self.root)
+        if resp and resp.lower().strip() == "reset":
+            self.reset_application_data()
+
+    def reset_application_data(self):
+        try:
+            # 1. Clear Ledger
+            self.ledger = []
+            self.summary_count = 0
+            self.shortcuts_asked = False
+            self.save_ledger()
+
+            # 2. Reset Config (Defaults)
+            default_config = {
+                "startup": False,
+                "splash_img": "",
+                "cached_business_name": "My Business",
+                "previous_products": self.config.get("previous_products", []), # Preserve product memory to avoid huge popup on next start? Or reset?
+                # User said "Reset config.json", implies factory defaults.
+                # But let's keep "cached_business_name" from products if possible?
+                # Actually, load_products sets it. So safe to clear.
+                "recipient_email": "",
+                "last_bi_date": "",
+                "last_successful_summary_time": ""
+            }
+            self.config = default_config
+            self.save_config()
+
+            # 3. Delete Generated Files
+            folders_to_clear = [RECEIPT_FOLDER, INVENTORY_FOLDER, SUMMARY_FOLDER, CORRECTION_FOLDER, DAMAGED_FOLDER]
+            for folder in folders_to_clear:
+                if os.path.exists(folder):
+                    for filename in os.listdir(folder):
+                        file_path = os.path.join(folder, filename)
+                        try:
+                            if os.path.isfile(file_path) or os.path.islink(file_path):
+                                os.unlink(file_path)
+                            elif os.path.isdir(file_path):
+                                shutil.rmtree(file_path)
+                        except Exception as e:
+                            print(f'Failed to delete {file_path}. Reason: {e}')
+
+            # 4. Refresh UI
+            self.refresh_stock_cache()
+            self.refresh_inv()
+            self.refresh_pos()
+            self.refresh_correction_list()
+            self.gen_view() # Clear summary view
+            self.entry_email.delete(0, tk.END)
+            self.chk_startup_var.set(False)
+
+            messagebox.showinfo("RESET COMPLETE", "Application data has been reset to factory state.")
+
+        except Exception as e:
+            messagebox.showerror("Reset Error", f"Failed to reset data: {e}")
+
+    def prompt_load_test(self):
+        if not self.products_df.empty:
+            if messagebox.askyesno("Load Test", "Simulate 4 weeks of data (Sales, Inventory, Damages)?\nThis will generate many PDF files and transactions."):
+                threading.Thread(target=self.run_load_test_simulation, daemon=True).start()
+        else:
+            messagebox.showerror("Error", "No products available to simulate.")
+
+    def run_load_test_simulation(self):
+        try:
+            # Setup
+            products = self.products_df.to_dict('records')
+            valid_names = [p['Product Name'] for p in products]
+            start_date = datetime.datetime.now() - datetime.timedelta(days=28)
+
+            # Define sources for random selection
+            sources = ["Delivery Receipt", "O_Beverages"]
+
+            sim_ledger = []
+
+            # Helper to generate PDF/Ledger wrapper
+            def log_sim_transaction(t_type, date_obj, items, filename_prefix, folder):
+                ts_str = date_obj.strftime('%Y-%m-%d %H:%M:%S')
+                fname = f"{filename_prefix}_{date_obj.strftime('%Y%m%d-%H%M%S')}.pdf"
+
+                # PDF Generation
+                # We need to reuse generate_grouped_pdf but we are in a thread.
+                # generate_grouped_pdf accesses self.business_name etc which is fine.
+                # Canvas generation is thread-safe usually if writing to distinct files.
+
+                full_path = os.path.join(folder, fname)
+
+                pdf_items = []
+                ledger_items_internal = []
+
+                if t_type == "inventory":
+                    # Inventory Items
+                    for i in items:
+                        # Logic for new_stock is tricky without running full stats calculation every step.
+                        # But for simulation, maybe we can approximate or skip new_stock column accuracy in PDF?
+                        # Or keep a running 'sim_stock' dictionary locally in this thread.
+
+                        # Let's track stock locally for this simulation run to be accurate
+                        pass
+
+                # Actually, let's just construct the transaction object and append to sim_ledger
+                # And generate PDF.
+
+                # PDF Content Prep
+                col_headers = []
+                col_pos = []
+                subtotal_idx = []
+                title = ""
+
+                if t_type == "inventory":
+                    title = "INVENTORY RECEIPT"
+                    col_headers = ["Item", "Price", "Qty Added", "Source"] # Omitted New Stock for simplicity in sim?
+                    # Or we can track it. Let's try to track it.
+                    col_pos = [1.0, 3.2, 4.0, 5.0]
+                    subtotal_idx = [2]
+
+                    for i in items:
+                        c = i.copy()
+                        # Clean up for PDF
+                        # inventory items have qty (packs)
+                        pdf_items.append(c)
+
+                elif t_type == "sales":
+                    title = "SALES RECEIPT"
+                    col_headers = ["Item", "Price", "Qty", "Total"]
+                    col_pos = [1.0, 4.5, 5.5, 6.5]
+                    subtotal_idx = [2, 3]
+                    for i in items:
+                        c = i.copy()
+                        c['category'] = f"{i.get('source', 'General')} - {i.get('category', 'General')}"
+                        pdf_items.append(c)
+
+                elif t_type == "damaged_in":
+                    title = "DAMAGED INVENTORY (IN)"
+                    col_headers = ["Item", "Source", "Qty"]
+                    col_pos = [1.0, 4.5, 6.5]
+                    subtotal_idx = [2]
+                    for i in items:
+                        c = i.copy()
+                        c['category'] = f"{i.get('source', 'General')} - {i.get('category', 'General')}"
+                        pdf_items.append(c)
+
+                elif t_type == "damaged_out":
+                    title = "RETURNS RECEIPT"
+                    col_headers = ["Item", "Price", "Qty"]
+                    col_pos = [1.0, 4.5, 5.5]
+                    subtotal_idx = [2]
+                    pdf_items = items
+
+                elif t_type == "beginning_inventory":
+                    # Special Case
+                    pass
+
+                if t_type != "beginning_inventory":
+                    self.generate_grouped_pdf(full_path, title, ts_str, pdf_items, col_headers, col_pos, subtotal_indices=subtotal_idx, is_inventory=(t_type=="inventory"))
+
+                transaction = {
+                    "type": t_type,
+                    "timestamp": ts_str,
+                    "filename": fname,
+                    "items": items
+                }
+                return transaction
+
+            # Local Sim State
+            sim_stock = {name: {'Remaining': 0, 'Delivery Receipt': 0, 'Transfers': 0, 'O_Beverages': 0, 'Damaged': 0} for name in valid_names}
+
+            def get_total_stock(name):
+                s = sim_stock.get(name, {})
+                return s.get('Remaining', 0) + s.get('Delivery Receipt', 0) + s.get('Transfers', 0) + s.get('O_Beverages', 0)
+
+            total_days = 29
+
+            for day_offset in range(total_days):
+                curr_date = start_date + datetime.timedelta(days=day_offset)
+                curr_date_str = curr_date.strftime('%Y-%m-%d')
+
+                # 0. Simulate Daily Rollover (Start of Day)
+                # Move DR/Transfers to Remaining from previous day
+                # In simulation, we do this first thing in the morning logic
+                items_rolled = []
+                for name in valid_names:
+                    # Check O_Beverage
+                    is_bev = False
+                    # Quick lookup in products list
+                    p_row = next((p for p in products if p['Product Name'] == name), None)
+                    if p_row:
+                        if p_row.get('Src_O_Beverages') or p_row.get('Src_Beverages'): is_bev = True
+
+                    if not is_bev:
+                        dr = sim_stock[name]['Delivery Receipt']
+                        tr = sim_stock[name]['Transfers']
+
+                        if dr > 0:
+                            sim_stock[name]['Delivery Receipt'] -= dr
+                            sim_stock[name]['Remaining'] += dr
+                            items_rolled.append({"name": name, "qty": -dr, "source": "Delivery Receipt"})
+                            items_rolled.append({"name": name, "qty": dr, "source": "Remaining"})
+                        if tr > 0:
+                            sim_stock[name]['Transfers'] -= tr
+                            sim_stock[name]['Remaining'] += tr
+                            items_rolled.append({"name": name, "qty": -tr, "source": "Transfers"})
+                            items_rolled.append({"name": name, "qty": tr, "source": "Remaining"})
+
+                if items_rolled:
+                    # Create internal rollover transaction
+                    sim_ledger.append({
+                        "type": "inventory", # Using inventory type for calculation
+                        "timestamp": curr_date.replace(hour=6, minute=0).strftime('%Y-%m-%d %H:%M:%S'),
+                        "filename": "AUTO_ROLLOVER_SIM",
+                        "items": items_rolled
+                    })
+
+                # 1. Beginning Inventory Report (Morning)
+                # Generate based on current sim_stock
+                bi_items = []
+                for name, sources in sim_stock.items():
+                    rem = sources['Remaining']
+                    dmg_rem = 0 # Simplified damage tracking for BI (only total damaged?)
+                    # sim_stock['Damaged'] is total. Assume all in Remaining for BI display or split?
+                    # BI usually shows stock per source.
+
+                    # BI Report logic:
+                    # Item, Source, Stock, Damaged.
+                    # We only track total damaged in sim_stock['Damaged'].
+                    # Let's assign damaged to Remaining for reporting.
+                    dmg = sim_stock[name]['Damaged']
+
+                    p_row = next((p for p in products if p['Product Name'] == name), None)
+                    price = float(p_row['Price']) if p_row else 0
+                    cat = p_row['Product Category'] if p_row else "General"
+
+                    if rem > 0 or dmg > 0:
+                        bi_items.append({"name": name, "qty": rem, "damaged": dmg, "source": "Remaining", "price": price, "category": cat})
+
+                    # Beverage
+                    bev = sources['O_Beverages']
+                    if bev > 0:
+                         bi_items.append({"name": name, "qty": bev, "damaged": 0, "source": "O_Beverages", "price": price, "category": cat})
+
+                if bi_items:
+                    bi_fname = f"BeginningInv_{curr_date.strftime('%Y%m%d')}-070000.pdf"
+                    full_bi_path = os.path.join(RECEIPT_FOLDER, bi_fname)
+                    # Use existing generate function
+                    # Headers: ["Item", "Source", "Stock", "Damaged"]
+                    self.generate_grouped_pdf(full_bi_path, "BEGINNING INVENTORY",
+                                              curr_date.strftime('%Y-%m-%d 07:00:00'), bi_items,
+                                              ["Item", "Source", "Stock", "Damaged"], [1.0, 4.0, 5.5, 6.5], subtotal_indices=[2,3])
+
+                # 2. Stock In (Morning) - Ensure we have stock for sales
+                # Pick 5-10 random products to restock
+                restock_count = random.randint(5, 15)
+                restock_items = []
+                for _ in range(restock_count):
+                    p = random.choice(products)
+                    name = p['Product Name']
+
+                    # Determine source
+                    src = "Delivery Receipt"
+                    if p.get('Src_O_Beverages'): src = "O_Beverages"
+
+                    qty_packs = random.randint(5, 20)
+                    multiplier = int(p.get('Servings_Per_Unit', 1))
+                    if src != "Delivery Receipt": multiplier = 1
+
+                    qty_servings = qty_packs * multiplier
+
+                    # Add to sim stock
+                    sim_stock[name][src] += qty_servings
+
+                    restock_items.append({
+                        "name": name,
+                        "price": float(p['Price']),
+                        "qty": qty_servings, # Ledger stores servings
+                        "qty_packs": qty_packs,
+                        "pack_multiplier": multiplier,
+                        "source": src,
+                        "category": p['Product Category']
+                    })
+
+                if restock_items:
+                    t = log_sim_transaction("inventory", curr_date.replace(hour=8, minute=30), restock_items, "Inventory", INVENTORY_FOLDER)
+                    sim_ledger.append(t)
+
+                # 3. Sales (Throughout Day) - 20 to 30 transactions
+                sales_count = random.randint(20, 30)
+                # Generate sorted random times between 09:00 and 20:00
+                start_ts = curr_date.replace(hour=9, minute=0).timestamp()
+                end_ts = curr_date.replace(hour=20, minute=0).timestamp()
+
+                txn_times = sorted([datetime.datetime.fromtimestamp(random.uniform(start_ts, end_ts)) for _ in range(sales_count)])
+
+                for t_time in txn_times:
+                    cart_size = random.randint(1, 5)
+                    cart_items = []
+
+                    for _ in range(cart_size):
+                        p = random.choice(products)
+                        name = p['Product Name']
+                        avail = get_total_stock(name)
+
+                        if avail <= 0:
+                            # Skip this item if no stock
+                            continue
+
+                        qty_buy = random.randint(1, min(5, max(1, int(avail))))
+                        price = float(p['Price'])
+
+                        # Deplete sim stock (Logic similar to checkout)
+                        # Priority: Remaining -> Delivery Receipt -> Transfers -> O_Beverages
+                        qty_needed = qty_buy
+                        breakdown = {}
+
+                        for src in ["Remaining", "Delivery Receipt", "Transfers", "O_Beverages"]:
+                            if qty_needed <= 0: break
+                            s_avail = sim_stock[name][src]
+                            if s_avail > 0:
+                                take = min(s_avail, qty_needed)
+                                sim_stock[name][src] -= take
+                                breakdown[src] = take
+                                qty_needed -= take
+
+                        # Add to cart with breakdown
+                        # We need separate cart items per source for PDF generation grouping
+                        for src, q in breakdown.items():
+                             cart_items.append({
+                                 "name": name,
+                                 "price": price,
+                                 "qty": q,
+                                 "subtotal": q * price,
+                                 "source": src,
+                                 "category": p['Product Category'],
+                                 "source_breakdown": {src: q} # Ledger format
+                             })
+
+                    if cart_items:
+                         t = log_sim_transaction("sales", t_time, cart_items, "Sales", RECEIPT_FOLDER)
+                         sim_ledger.append(t)
+
+                # 4. Damages (Late Afternoon) - 5-10% of transaction volume? Or random items
+                if random.random() < 0.7: # 70% chance of damages happening
+                    dmg_items = []
+                    dmg_count = random.randint(1, 3)
+                    for _ in range(dmg_count):
+                         p = random.choice(products)
+                         name = p['Product Name']
+                         avail = get_total_stock(name)
+                         if avail > 0:
+                             qty_dmg = random.randint(1, max(1, int(avail // 10))) # Small amount
+
+                             # Deplete stock, move to Damaged
+                             qty_needed = qty_dmg
+                             breakdown = {}
+                             for src in ["Remaining", "Delivery Receipt", "Transfers", "O_Beverages"]:
+                                if qty_needed <= 0: break
+                                s_avail = sim_stock[name][src]
+                                if s_avail > 0:
+                                    take = min(s_avail, qty_needed)
+                                    sim_stock[name][src] -= take
+                                    breakdown[src] = take
+                                    qty_needed -= take
+
+                             sim_stock[name]['Damaged'] += qty_dmg
+
+                             for src, q in breakdown.items():
+                                 dmg_items.append({
+                                     "name": name,
+                                     "qty": q,
+                                     "source": src,
+                                     "category": p['Product Category'],
+                                     "source_breakdown": {src: q}
+                                 })
+
+                    if dmg_items:
+                        t = log_sim_transaction("damaged_in", curr_date.replace(hour=17), dmg_items, "DamagedIn", DAMAGED_FOLDER)
+                        sim_ledger.append(t)
+
+                # 5. Returns (Evening) - 1-2 items
+                if random.random() < 0.3:
+                    ret_items = []
+                    # Find items with damages
+                    dmg_candidates = [n for n, s in sim_stock.items() if s['Damaged'] > 0]
+                    if dmg_candidates:
+                        name = random.choice(dmg_candidates)
+                        qty_ret = 1
+                        sim_stock[name]['Damaged'] -= qty_ret
+
+                        p = next(p for p in products if p['Product Name'] == name)
+                        ret_items.append({
+                            "name": name,
+                            "qty": qty_ret,
+                            "price": float(p['Price']),
+                            "category": p['Product Category']
+                        })
+
+                        t = log_sim_transaction("damaged_out", curr_date.replace(hour=18), ret_items, "Returns", DAMAGED_FOLDER)
+                        sim_ledger.append(t)
+
+            # Finalize
+            self.ledger.extend(sim_ledger)
+            self.save_ledger()
+
+            # Refresh UI (Thread Safe)
+            def finalize_ui():
+                self.refresh_stock_cache()
+                self.refresh_inv()
+                self.refresh_pos()
+                self.gen_view()
+                messagebox.showinfo("Simulation Complete", "Load Test Finished.\nGenerated 4 weeks of data.")
+
+            self.root.after(0, finalize_ui)
+
+        except Exception as e:
+            print(e)
+            self.root.after(0, lambda: messagebox.showerror("Simulation Error", f"Error: {e}"))
 
 def launch_app():
     # --- Close PyInstaller Splash (if active) ---
