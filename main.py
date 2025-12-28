@@ -2195,7 +2195,12 @@ class POSSystem:
             prod_row = self.products_df[self.products_df['Product Name'] == i['name']]
             servings_unit = 1
             if not prod_row.empty:
-                servings_unit = prod_row.iloc[0].get('Servings_Per_Unit', 1)
+                try:
+                    # Explicitly cast to int to avoid numpy.int64 JSON serialization issues
+                    val = prod_row.iloc[0].get('Servings_Per_Unit', 1)
+                    servings_unit = int(val)
+                except (ValueError, TypeError):
+                    servings_unit = 1
 
             # Apply multiplier only if Source is Delivery Receipt
             multiplier = 1
@@ -2218,9 +2223,9 @@ class POSSystem:
 
             # Prepare Item for Ledger (Stores Servings as main Qty for stats, Packs for reference)
             l_item = i.copy()
-            l_item['qty'] = qty_servings # Main Qty is Servings for calculate_stats
-            l_item['qty_packs'] = qty_packs
-            l_item['pack_multiplier'] = multiplier
+            l_item['qty'] = int(qty_servings) # Main Qty is Servings for calculate_stats
+            l_item['qty_packs'] = int(qty_packs)
+            l_item['pack_multiplier'] = int(multiplier)
             ledger_items.append(l_item)
 
         if self.generate_grouped_pdf(os.path.join(INVENTORY_FOLDER, fname), "INVENTORY RECEIPT",
