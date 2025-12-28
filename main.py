@@ -1219,13 +1219,37 @@ class POSSystem:
 
                 _, _, curr_price, _, _ = self.get_product_details_extended(name)
 
+                # Calculate packs for accurate cost/breakdown in Summary
+                prod_row = self.products_df[self.products_df['Product Name'] == name]
+                multiplier = 1
+                if not prod_row.empty:
+                    try:
+                        multiplier = int(prod_row.iloc[0].get('Servings_Per_Unit', 1))
+                    except:
+                        multiplier = 1
+                if multiplier < 1: multiplier = 1
+
                 if dr_qty > 0:
-                    items_to_move.append({"name": name, "qty": -dr_qty, "source": "Delivery Receipt", "price": curr_price, "category": "Rollover"})
-                    items_to_move.append({"name": name, "qty": dr_qty, "source": "Remaining", "price": curr_price, "category": "Rollover"})
+                    dr_packs = dr_qty / multiplier
+                    items_to_move.append({
+                        "name": name, "qty": -dr_qty, "qty_packs": -dr_packs, "pack_multiplier": multiplier,
+                        "source": "Delivery Receipt", "price": curr_price, "category": "Rollover"
+                    })
+                    items_to_move.append({
+                        "name": name, "qty": dr_qty, "qty_packs": dr_packs, "pack_multiplier": multiplier,
+                        "source": "Remaining", "price": curr_price, "category": "Rollover"
+                    })
 
                 if tr_qty > 0:
-                    items_to_move.append({"name": name, "qty": -tr_qty, "source": "Transfers", "price": curr_price, "category": "Rollover"})
-                    items_to_move.append({"name": name, "qty": tr_qty, "source": "Remaining", "price": curr_price, "category": "Rollover"})
+                    tr_packs = tr_qty / multiplier
+                    items_to_move.append({
+                        "name": name, "qty": -tr_qty, "qty_packs": -tr_packs, "pack_multiplier": multiplier,
+                        "source": "Transfers", "price": curr_price, "category": "Rollover"
+                    })
+                    items_to_move.append({
+                        "name": name, "qty": tr_qty, "qty_packs": tr_packs, "pack_multiplier": multiplier,
+                        "source": "Remaining", "price": curr_price, "category": "Rollover"
+                    })
 
         if items_to_move:
              now = self.get_time()
@@ -2542,6 +2566,7 @@ class POSSystem:
         self.ta_source_var = tk.StringVar()
         self.ta_source_combo = ttk.Combobox(top, textvariable=self.ta_source_var, values=SOURCES, width=15, state="readonly")
         self.ta_source_combo.pack(side="left", padx=5)
+        self.ta_source_combo.bind("<<ComboboxSelected>>", self.update_ta_stock_display)
 
         ttk.Label(top, text="Qty:").pack(side="left")
         self.ta_qty_var = tk.IntVar(value=1)
@@ -2599,10 +2624,33 @@ class POSSystem:
         f3 = ttk.Frame(self.tab_ta_flush)
         f3.pack(fill="both", expand=True, padx=20, pady=20)
 
-        ttk.Label(f3, text="Flush Damaged Inventory", font=("Segoe UI", 16, "bold")).pack(pady=20)
+        ttk.Label(f3, text="Flush Damaged Inventory", font=("Segoe UI", 16, "bold")).pack(pady=10)
+        ttk.Label(f3, text="Current Damaged Stock:", font=("Segoe UI", 10)).pack(anchor="w")
+
+        # Treeview for Flush
+        self.flush_tree = ttk.Treeview(f3, columns=("name", "qty"), show="headings", height=15)
+        self.flush_tree.heading("name", text="Product")
+        self.flush_tree.heading("qty", text="Damaged Qty")
+        self.flush_tree.column("name", width=300)
+        self.flush_tree.column("qty", width=100)
+        self.flush_tree.pack(fill="both", expand=True, pady=5)
+
         ttk.Label(f3, text="This will clear ALL products currently in 'Damaged' status.\nThis action cannot be undone and generates no receipt.", justify="center").pack(pady=10)
 
-        ttk.Button(f3, text="FLUSH ALL DAMAGED INVENTORY", command=self.flush_damaged, style="Danger.TButton").pack(pady=20, ipadx=20, ipady=10)
+        ttk.Button(f3, text="FLUSH ALL DAMAGED INVENTORY", command=self.flush_damaged, style="Danger.TButton").pack(pady=10, ipadx=20, ipady=10)
+
+        # Bind sub-tab change to refresh flush list
+        self.tab_ta_notebook.bind("<<NotebookTabChanged>>", self.on_ta_tab_change)
+
+    def on_ta_tab_change(self, event):
+        self.refresh_flush_list()
+
+    def refresh_flush_list(self):
+        for i in self.flush_tree.get_children(): self.flush_tree.delete(i)
+        stats = self.current_stock_cache
+        for name, data in stats.items():
+            if data['damaged'] > 0:
+                self.flush_tree.insert("", "end", values=(name, int(data['damaged'])))
 
     def on_ta_prod_sel(self, event):
         sel = self.ta_prod_var.get()
@@ -2619,8 +2667,26 @@ class POSSystem:
         self.ta_source_combo['values'] = valid_sources
         if valid_sources: self.ta_source_combo.set(valid_sources[0])
 
-        # Show stock of selected source?
-        self.lbl_ta_stock.config(text="")
+        self.update_ta_stock_display()
+
+    def update_ta_stock_display(self, event=None):
+        name_sel = self.ta_prod_var.get()
+        source_sel = self.ta_source_var.get()
+        if not name_sel or not source_sel:
+            self.lbl_ta_stock.config(text="")
+            return
+
+        _, name, _, _ = self.get_product_details(name_sel)
+        stats = self.current_stock_cache.get(name, {'sources': {}})
+        avail = stats['sources'].get(source_sel, 0)
+
+        # Check cart
+        in_cart = 0
+        for i in self.ta_cart:
+            if i['name'] == name and i['source'] == source_sel:
+                in_cart += i['qty']
+
+        self.lbl_ta_stock.config(text=f"Stock: {int(avail - in_cart)}")
 
     def on_ret_prod_sel(self, event):
         sel = self.ret_prod_var.get()
@@ -2778,6 +2844,7 @@ class POSSystem:
         self.ledger.append(transaction)
         self.save_ledger()
         self.refresh_stock_cache()
+        self.refresh_flush_list()
         messagebox.showinfo("Success", "Damaged inventory flushed.")
 
     def setup_correction_tab(self):
@@ -3030,12 +3097,15 @@ class POSSystem:
                 if p_val == 0: p_val = curr_price
 
                 key = (line['source'], p_val)
-                if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
+                if key not in act_map: act_map[key] = {'in': 0, 'packs_in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
                 act_map[key]['in'] += line['qty']
+
+                # Determine packs
+                count_for_cost = line.get('packs', line['qty'])
+                act_map[key]['packs_in'] += count_for_cost
+
                 # DR Total is now calculated on STOCK IN for Delivery Receipt
                 if line['source'] == "Delivery Receipt":
-                    # Use packs count for cost calculation if available
-                    count_for_cost = line.get('packs', line['qty'])
                     act_map[key]['dr_total'] += dr_price * count_for_cost
 
             # Process Sales (OUT)
@@ -3054,7 +3124,7 @@ class POSSystem:
                     if p_val == 0: p_val = curr_price
 
                     key = (src, p_val)
-                    if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
+                    if key not in act_map: act_map[key] = {'in': 0, 'packs_in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
 
                     act_map[key]['out'] += qty
                     # Proportional sales amount
@@ -3065,7 +3135,7 @@ class POSSystem:
             for line in p_data.get('returns_lines', []):
                 key = ('Remaining', curr_price) # Default
 
-                if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
+                if key not in act_map: act_map[key] = {'in': 0, 'packs_in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
                 act_map[key]['returns'] += line['qty']
 
                 # Add to flattened breakdown list
@@ -3090,7 +3160,7 @@ class POSSystem:
                     prices.add(curr_price)
 
                 for p in sorted(prices, reverse=True):
-                    d = act_map.get((src, p), {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0})
+                    d = act_map.get((src, p), {'in': 0, 'packs_in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0})
 
                     show_rem = 0
                     show_dmg = 0
@@ -3113,6 +3183,7 @@ class POSSystem:
                         'source': src,
                         'price': p,
                         'in': d['in'],
+                        'packs_in': d['packs_in'],
                         'out': d['out'],
                         'remaining': show_rem,
                         'damaged': show_dmg,
@@ -3640,16 +3711,24 @@ class POSSystem:
                         dr = sim_stock[name]['Delivery Receipt']
                         tr = sim_stock[name]['Transfers']
 
+                        # Lookup multiplier
+                        # Ensure p_row is defined in this scope
+                        p_row_local = next((p for p in products if p['Product Name'] == name), None)
+                        multiplier = int(p_row_local.get('Servings_Per_Unit', 1)) if p_row_local else 1
+                        if multiplier < 1: multiplier = 1
+
                         if dr > 0:
                             sim_stock[name]['Delivery Receipt'] -= dr
                             sim_stock[name]['Remaining'] += dr
-                            items_rolled.append({"name": name, "qty": -dr, "source": "Delivery Receipt"})
-                            items_rolled.append({"name": name, "qty": dr, "source": "Remaining"})
+                            dr_packs = dr / multiplier
+                            items_rolled.append({"name": name, "qty": -dr, "qty_packs": -dr_packs, "pack_multiplier": multiplier, "source": "Delivery Receipt"})
+                            items_rolled.append({"name": name, "qty": dr, "qty_packs": dr_packs, "pack_multiplier": multiplier, "source": "Remaining"})
                         if tr > 0:
                             sim_stock[name]['Transfers'] -= tr
                             sim_stock[name]['Remaining'] += tr
-                            items_rolled.append({"name": name, "qty": -tr, "source": "Transfers"})
-                            items_rolled.append({"name": name, "qty": tr, "source": "Remaining"})
+                            tr_packs = tr / multiplier
+                            items_rolled.append({"name": name, "qty": -tr, "qty_packs": -tr_packs, "pack_multiplier": multiplier, "source": "Transfers"})
+                            items_rolled.append({"name": name, "qty": tr, "qty_packs": tr_packs, "pack_multiplier": multiplier, "source": "Remaining"})
 
                 if items_rolled:
                     # Create internal rollover transaction
@@ -3739,35 +3818,64 @@ class POSSystem:
                     t = log_sim_transaction("inventory", curr_date.replace(hour=8, minute=30), restock_items, "Inventory", INVENTORY_FOLDER)
                     sim_ledger.append(t)
 
-                # 3. Sales (Throughout Day) - 20 to 30 transactions
-                sales_count = random.randint(20, 30)
-                # Generate sorted random times between 09:00 and 20:00
+                # 3. Sales (Throughout Day) - Target 8000 to 12000 total
+                target_daily_sales = random.uniform(8000, 12000)
+                current_daily_sales = 0.0
+                sales_candidates = []
+
                 start_ts = curr_date.replace(hour=9, minute=0).timestamp()
                 end_ts = curr_date.replace(hour=20, minute=0).timestamp()
 
-                txn_times = sorted([datetime.datetime.fromtimestamp(random.uniform(start_ts, end_ts)) for _ in range(sales_count)])
+                # Generate candidates
+                attempts = 0
+                while current_daily_sales < target_daily_sales and attempts < 300:
+                    attempts += 1
+                    t_time = datetime.datetime.fromtimestamp(random.uniform(start_ts, end_ts))
 
-                for t_time in txn_times:
                     cart_size = random.randint(1, 5)
                     cart_items = []
+                    cart_total = 0
 
                     for _ in range(cart_size):
                         p = random.choice(products)
-                        name = p['Product Name']
-                        avail = get_total_stock(name)
-
-                        if avail <= 0:
-                            # Skip this item if no stock
-                            continue
-
-                        qty_buy = random.randint(1, min(5, max(1, int(avail))))
+                        # Don't check stock here, check at execution time to handle concurrency of sorts
+                        qty_buy = random.randint(1, 5)
                         price = float(p['Price'])
 
-                        # Deplete sim stock (Logic similar to checkout)
-                        # Priority: Remaining -> Delivery Receipt -> Transfers -> O_Beverages
-                        qty_needed = qty_buy
-                        breakdown = {}
+                        cart_items.append({
+                            "product": p,
+                            "qty_req": qty_buy,
+                            "price": price
+                        })
+                        cart_total += qty_buy * price
 
+                    if cart_items:
+                        sales_candidates.append({'time': t_time, 'items': cart_items})
+                        current_daily_sales += cart_total
+
+                # Sort by time
+                sales_candidates.sort(key=lambda x: x['time'])
+
+                # Execute transactions
+                for cand in sales_candidates:
+                    t_time = cand['time']
+                    final_cart = []
+
+                    for item in cand['items']:
+                        p = item['product']
+                        name = p['Product Name']
+                        qty_req = item['qty_req']
+                        price = item['price']
+
+                        avail = get_total_stock(name)
+                        if avail <= 0: continue
+
+                        # Adjust qty if stock limited
+                        actual_qty = min(qty_req, int(avail))
+
+                        # Deplete
+                        qty_needed = actual_qty
+                        breakdown = {}
                         for src in ["Remaining", "Delivery Receipt", "Transfers", "O_Beverages"]:
                             if qty_needed <= 0: break
                             s_avail = sim_stock[name][src]
@@ -3777,22 +3885,21 @@ class POSSystem:
                                 breakdown[src] = take
                                 qty_needed -= take
 
-                        # Add to cart with breakdown
-                        # We need separate cart items per source for PDF generation grouping
+                        # Add to cart
                         for src, q in breakdown.items():
-                             cart_items.append({
+                             final_cart.append({
                                  "name": name,
                                  "price": price,
                                  "qty": q,
                                  "subtotal": q * price,
                                  "source": src,
                                  "category": p['Product Category'],
-                                 "source_breakdown": {src: q} # Ledger format
+                                 "source_breakdown": {src: q}
                              })
 
-                    if cart_items:
-                         t = log_sim_transaction("sales", t_time, cart_items, "Sales", RECEIPT_FOLDER)
-                         sim_ledger.append(t)
+                    if final_cart:
+                        t = log_sim_transaction("sales", t_time, final_cart, "Sales", RECEIPT_FOLDER)
+                        sim_ledger.append(t)
 
                 # 4. Damages (Mark unsold Remaining as Damaged) - End of Day
                 dmg_items = []
