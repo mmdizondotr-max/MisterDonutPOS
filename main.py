@@ -1998,16 +1998,23 @@ class POSSystem:
                 for item in items:
                     # dr_total is calculated for "Delivery Receipt" lines
                     if item.get('source') == "Delivery Receipt" and item.get('dr_total', 0) > 0:
-                        # Find the product's DR Price. item['dr_total'] = qty_in * dr_price
-                        # We need to reverse engineer dr_price or pass it in data.
-                        # Actually 'data' passed to gen_pdf has 'dr_total' already.
-                        # item['in'] is Qty Added.
+                        # Find the product's DR Price. item['dr_total'] = qty_packs * dr_price_per_pack
+                        # item['in'] is Qty Added (Servings). item['packs_in'] is Packs.
                         qty_added = item.get('in', 0)
+                        qty_packs = item.get('packs_in', 0)
+
+                        if qty_packs > 0:
+                            dr_price_calc = item['dr_total'] / qty_packs
+                        elif qty_added > 0:
+                            dr_price_calc = item['dr_total'] / qty_added # Fallback
+                        else:
+                            dr_price_calc = 0
+
                         if qty_added > 0:
-                            dr_price_calc = item['dr_total'] / qty_added
                             dr_breakdown_items.append({
                                 "name": item['name'],
                                 "dr_price": dr_price_calc,
+                                "qty_packs": qty_packs,
                                 "qty": qty_added,
                                 "subtotal": item['dr_total']
                             })
@@ -2021,9 +2028,9 @@ class POSSystem:
                     y -= 20
 
                     # Table Header
-                    hdrs = ["Item", "DR Price", "Qty Added", "Subtotal"]
+                    hdrs = ["Item", "DR Price", "In (Pks)", "In (Srv)", "Subtotal"]
                     # Updated coords for alignment
-                    h_pos = [1.0, 4.0, 5.5, 6.5]
+                    h_pos = [1.0, 4.0, 4.8, 5.6, 6.5]
                     c.setFont("Helvetica-Bold", 9)
                     for i, h in enumerate(hdrs): c.drawString(h_pos[i] * inch, y, h)
                     c.setLineWidth(1)
@@ -2034,7 +2041,7 @@ class POSSystem:
                     c.setFont("Helvetica", 9)
                     for d_item in dr_breakdown_items:
                         if y < 1 * inch: c.showPage(); y = height - 1 * inch
-                        row_t = [d_item['name'][:40], f"{d_item['dr_price']:.2f}", str(int(d_item['qty'])), f"{d_item['subtotal']:.2f}"]
+                        row_t = [d_item['name'][:40], f"{d_item['dr_price']:.2f}", str(int(d_item['qty_packs'])), str(int(d_item['qty'])), f"{d_item['subtotal']:.2f}"]
                         for i, txt in enumerate(row_t): c.drawString(h_pos[i] * inch, y, txt)
                         grand_dr_total += d_item['subtotal']
                         y -= 15
@@ -3295,14 +3302,14 @@ class POSSystem:
         fname = f"{prefix}-{now.strftime('%Y%m%d-%H%M%S')}.pdf"
         full_path = os.path.join(SUMMARY_FOLDER, fname)
 
-        # Summary Headers: Product, Source, Price, Added, In(Pks), Sold, Stock, Damaged, Sales
-        # Indices:         0        1       2      3      4        5     6      7        8
+        # Summary Headers: Product, Source, Price, Added, Sold, Stock, Damaged, Sales
+        # Indices:         0        1       2      3      4     5      6        7
         success = self.generate_grouped_pdf(full_path, "INVENTORY & SALES SUMMARY",
                                             now.strftime('%Y-%m-%d %H:%M:%S'), data,
-                                            ["Product", "Source", "Price", "Added", "In(Pks)", "Sold", "Stock", "Damaged", "Sales"],
-                                            [1.0, 3.0, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0], is_summary=True,
+                                            ["Product", "Source", "Price", "Added", "Sold", "Stock", "Damaged", "Sales"],
+                                            [1.0, 3.2, 4.3, 4.8, 5.3, 5.8, 6.3, 6.9], is_summary=True,
                                             extra_info=f"Period: {p_txt} | In: {in_c} | Out: {out_c}",
-                                            subtotal_indices=[3, 4, 5, 6, 8], correction_list=corr_list, returns_breakdown=returns_breakdown)
+                                            subtotal_indices=[3, 4, 5, 6, 7], correction_list=corr_list, returns_breakdown=returns_breakdown)
         if success:
             if not is_custom_date:
                 self.summary_count += 1
