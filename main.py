@@ -1217,13 +1217,15 @@ class POSSystem:
                 # Item 1: Qty: -5, Source: Delivery Receipt
                 # Item 2: Qty: +5, Source: Remaining
 
+                _, _, curr_price, _, _ = self.get_product_details_extended(name)
+
                 if dr_qty > 0:
-                    items_to_move.append({"name": name, "qty": -dr_qty, "source": "Delivery Receipt", "price": 0, "category": "Rollover"})
-                    items_to_move.append({"name": name, "qty": dr_qty, "source": "Remaining", "price": 0, "category": "Rollover"})
+                    items_to_move.append({"name": name, "qty": -dr_qty, "source": "Delivery Receipt", "price": curr_price, "category": "Rollover"})
+                    items_to_move.append({"name": name, "qty": dr_qty, "source": "Remaining", "price": curr_price, "category": "Rollover"})
 
                 if tr_qty > 0:
-                    items_to_move.append({"name": name, "qty": -tr_qty, "source": "Transfers", "price": 0, "category": "Rollover"})
-                    items_to_move.append({"name": name, "qty": tr_qty, "source": "Remaining", "price": 0, "category": "Rollover"})
+                    items_to_move.append({"name": name, "qty": -tr_qty, "source": "Transfers", "price": curr_price, "category": "Rollover"})
+                    items_to_move.append({"name": name, "qty": tr_qty, "source": "Remaining", "price": curr_price, "category": "Rollover"})
 
         if items_to_move:
              now = self.get_time()
@@ -3018,7 +3020,11 @@ class POSSystem:
 
             # Process IN
             for line in p_data['in_lines']:
-                key = (line['source'], line['price'])
+                # FIX: If price is 0 (from legacy rollovers), use current price to merge lines
+                p_val = line['price']
+                if p_val == 0: p_val = curr_price
+
+                key = (line['source'], p_val)
                 if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
                 act_map[key]['in'] += line['qty']
                 # DR Total is now calculated on STOCK IN for Delivery Receipt
@@ -3038,7 +3044,11 @@ class POSSystem:
 
                 for src, qty in breakdown.items():
                     if qty == 0: continue
-                    key = (src, line['price'])
+
+                    p_val = line['price']
+                    if p_val == 0: p_val = curr_price
+
+                    key = (src, p_val)
                     if key not in act_map: act_map[key] = {'in': 0, 'out': 0, 'sales': 0, 'dr_total': 0, 'returns': 0}
 
                     act_map[key]['out'] += qty
